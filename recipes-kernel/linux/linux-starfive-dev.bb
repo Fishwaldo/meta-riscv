@@ -34,6 +34,7 @@ SRC_URI:append:visionfive = " \
 
 SRC_URI:append:jh7110 = " \
            file://visionfive2-graphics.cfg \
+           file://0001-drm-dc8200-disable-gamma-lut-now.patch \         
 "
 
 LINUX_VERSION ?= "6.2.0"
