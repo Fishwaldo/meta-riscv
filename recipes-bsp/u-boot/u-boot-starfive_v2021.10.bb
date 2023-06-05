@@ -27,9 +27,9 @@ SRC_URI:append:star64 = " \
 "
 
 
-# tag VF2_v2.11.5
-SRCREV:visionfive2 = "688befadf1d337dee3593e6cc0fe1c737cc150bd"
-SRCREV:star64 = "c71fa7376f4eaf29e2dc20e5a68418d79201290a"
+# tag VF2_v3.0.4
+SRCREV:visionfive2 = "b6e2b0e85c774a18ae668223a6e5f7d335895243"
+SRCREV:star64 = "172b47f62039605d6806fa96bd403c21cda28996"
 
 
 DEPENDS:append = " u-boot-tools-native"

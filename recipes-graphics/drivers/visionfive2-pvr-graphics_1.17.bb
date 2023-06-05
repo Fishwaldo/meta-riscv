@@ -1,6 +1,9 @@
 LICENSE="CLOSED"
 
-PROVIDES = "virtual/libgles2"
+PROVIDES = " \
+    virtual/libgles2 \
+    virtual/libgles1 \
+"
 COMPATIBLE_MACHINE = "jh7110"
 
 require recipes-bsp/common/visionfive2-firmware.inc
