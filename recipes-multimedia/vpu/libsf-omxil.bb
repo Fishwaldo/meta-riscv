@@ -15,9 +15,9 @@ SOLIBS = ".so"
 FILES_SOLIBSDEV = ""
 INSANE_SKIP:${PN} += "dev-so"
 
-SRC_URI += " \
-     file://CMakeLists.txt;subdir=git/omx-il \
-"
+SRC_URI += "file://CMakeLists.txt;subdir=git/omx-il \
+           file://0001-OMX-Fix-decoder-will-being-stuck-at-OMX_FreeHandle-a.patch;patchdir=.. \
+           "
 
 S = "${WORKDIR}/git/omx-il"
 

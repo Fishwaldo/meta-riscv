@@ -22,6 +22,14 @@ PREFERRED_PROVIDER_virtual/libgles1 ?= "visionfive2-pvr-graphics"
 PREFERRED_PROVIDER_virtual/libgles2 ?= "visionfive2-pvr-graphics"
 PREFERRED_PROVIDER_virtual/libgles3 ?= "mesa-pvr"
 PREFERRED_PROVIDER_virtual/libomxil ?= "libsf-omxil"
+PREFERRED_PROVIDER_virtual/opencl-icd ?= "visionfive2-pvr-graphics"
+PREFERRED_PROVIDER_opencl-headers ?= "visionfive2-pvr-graphics"
+
+#Mask out these recipes as the visionfive2-pvr-graphics provides them
+BBMASK:append = " \
+    meta-oe/recipes-core/opencl/opencl-icd-loader_git.bb \
+    meta-oe/recipes-core/opencl/opencl-headers_git.bb \
+"
 
 PREFERRED_VERSION_openocd-native = "riscv"
 PREFERRED_VERSION_openocd = "riscv"

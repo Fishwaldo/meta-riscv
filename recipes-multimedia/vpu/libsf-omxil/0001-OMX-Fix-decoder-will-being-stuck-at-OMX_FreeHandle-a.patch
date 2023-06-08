@@ -1,0 +1,23 @@
+From f1732aad6f1ac5f9766c5a17913659f00cc76ffe Mon Sep 17 00:00:00 2001
+From: Som Qin <som.qin@starfivetech.com>
+Date: Tue, 23 May 2023 15:13:07 +0800
+Subject: [PATCH] OMX: Fix decoder will being stuck at OMX_FreeHandle after
+ decode done
+
+Signed-off-by: Som Qin <som.qin@starfivetech.com>
+---
+ omx-il/component/video/wave5/dec/SF_OMX_Vdec_decoder.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/omx-il/component/video/wave5/dec/SF_OMX_Vdec_decoder.c b/omx-il/component/video/wave5/dec/SF_OMX_Vdec_decoder.c
+index 3c31da8..8fe2145 100644
+--- a/omx-il/component/video/wave5/dec/SF_OMX_Vdec_decoder.c
++++ b/omx-il/component/video/wave5/dec/SF_OMX_Vdec_decoder.c
+@@ -2169,7 +2169,6 @@ static OMX_ERRORTYPE SF_OMX_ComponentClear(SF_OMX_COMPONENT *pSfOMXComponent)
+     /* enqueue DEC_StopThread mean cmd thread cycle end */
+     cmd.Cmd = DEC_StopThread;
+     SF_Queue_Enqueue(pSfVideoImplement->CmdQueue, &cmd);
+-    pthread_cancel(pSfVideoImplement->pCmdThread->pthread);
+ 	pthread_join(pSfVideoImplement->pCmdThread->pthread, &ThreadRet);
+     LOG(SF_LOG_INFO, "Cmd thread end %ld\r\n", (Uint64)ThreadRet);
+     SF_Queue_Destroy(pSfVideoImplement->CmdQueue);

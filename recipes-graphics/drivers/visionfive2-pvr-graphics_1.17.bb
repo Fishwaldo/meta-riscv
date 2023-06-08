@@ -3,7 +3,13 @@ LICENSE="CLOSED"
 PROVIDES = " \
     virtual/libgles2 \
     virtual/libgles1 \
+    virtual/opencl-icd \
+    virtual/opencl-headers \
+    opencl-icd-loader \
+    opencl-headers \
 "
+#RPROVIDES:${PN} = "virtual/opencl-icd"
+
 COMPATIBLE_MACHINE = "jh7110"
 
 require recipes-bsp/common/visionfive2-firmware.inc
@@ -22,10 +28,12 @@ do_install () {
     tar xz --no-same-owner -f ${S}/IMG_GPU/out/${IMG_GPU_POWERVR_VERSION}.tar.gz -C ${D}
     mv ${D}/${IMG_GPU_POWERVR_VERSION}/target/* ${D}
     install -d ${D}/usr/include/
+    cp -r ${D}/${IMG_GPU_POWERVR_VERSION}/staging/usr/include/CL ${D}/usr/include/
     cp -r ${D}/${IMG_GPU_POWERVR_VERSION}/staging/usr/include/drv/ ${D}/usr/include/
     cp -r ${D}/${IMG_GPU_POWERVR_VERSION}/staging/usr/include/GLES/ ${D}/usr/include/
     cp -r ${D}/${IMG_GPU_POWERVR_VERSION}/staging/usr/include/GLES2/ ${D}/usr/include/
     cp -r ${D}/${IMG_GPU_POWERVR_VERSION}/staging/usr/include/GLES3/ ${D}/usr/include/
+    cp -r ${D}/${IMG_GPU_POWERVR_VERSION}/staging/usr/include/spirv/ ${D}/usr/include/
     install -d ${D}/usr/lib/pkgconfig/
     cp -r ${D}/${IMG_GPU_POWERVR_VERSION}/staging/usr/lib/pkgconfig/* ${D}/usr/lib/pkgconfig/
 
@@ -52,9 +60,12 @@ FILES:${PN}-firmware = " \
     ${base_libdir}/firmware/ \
 "
 
+DEPENDS += " \
+    libdrm \
+"
+
 RDEPENDS:${PN} += " \
     bash \
-    libdrm \
     linux-firmware-visionfive2-imggpu \
 "
 
