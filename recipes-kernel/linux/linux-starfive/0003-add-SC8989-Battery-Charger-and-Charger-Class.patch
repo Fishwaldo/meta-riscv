@@ -1,0 +1,3135 @@
+From 1e26d9a37c5d7e1545f9acf120edffca9f603ab1 Mon Sep 17 00:00:00 2001
+From: Justin Hammond <justin@dynam.ac>
+Date: Mon, 7 Aug 2023 05:41:13 +0000
+Subject: [PATCH] add SC8989 Battery Charger and Charger Class
+
+---
+ drivers/power/supply/Kconfig           |    5 +
+ drivers/power/supply/Makefile          |    1 +
+ drivers/power/supply/charger_class.c   |  780 ++++++++++++
+ drivers/power/supply/charger_class.h   |  320 +++++
+ drivers/power/supply/sc8989x_charger.c | 1589 ++++++++++++++++++++++++
+ drivers/power/supply/sc8989x_reg.h     |  378 ++++++
+ 6 files changed, 3073 insertions(+)
+ create mode 100755 drivers/power/supply/charger_class.c
+ create mode 100755 drivers/power/supply/charger_class.h
+ create mode 100755 drivers/power/supply/sc8989x_charger.c
+ create mode 100755 drivers/power/supply/sc8989x_reg.h
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index fcc7534edcb2..03ef89868d34 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -849,4 +849,9 @@ config CHARGER_SURFACE
+ 	  Microsoft Surface devices, i.e. Surface Pro 7, Surface Laptop 3,
+ 	  Surface Book 3, and Surface Laptop Go.
+ 
++config CHARGER_SC89890H
++	bool "CHARGER_SC89890H"
++	help
++	  Say Yes to enable sc89890h Charger IC
++
+ endif # POWER_SUPPLY
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 4e55a11aab79..1e64ec0fcbf3 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -97,6 +97,7 @@ obj-$(CONFIG_CHARGER_CROS_USBPD)	+= cros_usbpd-charger.o
+ obj-$(CONFIG_CHARGER_CROS_PCHG)	+= cros_peripheral_charger.o
+ obj-$(CONFIG_CHARGER_SC2731)	+= sc2731_charger.o
+ obj-$(CONFIG_FUEL_GAUGE_SC27XX)	+= sc27xx_fuel_gauge.o
++obj-$(CONFIG_CHARGER_SC89890H)  += sc8989x_charger.o
+ obj-$(CONFIG_CHARGER_UCS1002)	+= ucs1002_power.o
+ obj-$(CONFIG_CHARGER_BD99954)	+= bd99954-charger.o
+ obj-$(CONFIG_CHARGER_WILCO)	+= wilco-charger.o
+diff --git a/drivers/power/supply/charger_class.c b/drivers/power/supply/charger_class.c
+new file mode 100755
+index 000000000000..023910a7c486
+--- /dev/null
++++ b/drivers/power/supply/charger_class.c
+@@ -0,0 +1,780 @@
++// SPDX-License-Identifier: GPL-2.0
++
++/*
++ * Copyright (c) 2019 MediaTek Inc.
++ */
++
++#include <linux/module.h>
++#include <linux/stat.h>
++#include <linux/init.h>
++#include <linux/ctype.h>
++#include <linux/err.h>
++#include <linux/slab.h>
++
++#include "charger_class.h"
++
++static struct class *charger_class;
++
++static ssize_t name_show(struct device *dev,
++				    struct device_attribute *attr, char *buf)
++{
++	struct charger_device *chg_dev = to_charger_device(dev);
++
++	return snprintf(buf, 20, "%s\n",
++		       chg_dev->props.alias_name ?
++		       chg_dev->props.alias_name : "anonymous");
++}
++
++static void charger_device_release(struct device *dev)
++{
++	struct charger_device *chg_dev = to_charger_device(dev);
++
++	kfree(chg_dev);
++}
++
++int charger_dev_enable(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->enable)
++		return chg_dev->ops->enable(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable);
++
++int charger_dev_is_enabled(struct charger_device *chg_dev, bool *en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->is_enabled)
++		return chg_dev->ops->is_enabled(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_is_enabled);
++
++int charger_dev_plug_in(struct charger_device *chg_dev)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->plug_in)
++		return chg_dev->ops->plug_in(chg_dev);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_plug_in);
++
++int charger_dev_plug_out(struct charger_device *chg_dev)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->plug_out)
++		return chg_dev->ops->plug_out(chg_dev);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_plug_out);
++
++int charger_dev_do_event(struct charger_device *chg_dev, u32 event, u32 args)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->event)
++		return chg_dev->ops->event(chg_dev, event, args);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_do_event);
++
++int charger_dev_set_charging_current(struct charger_device *chg_dev, u32 uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->set_charging_current)
++		return chg_dev->ops->set_charging_current(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_charging_current);
++
++int charger_dev_get_charging_current(struct charger_device *chg_dev, u32 *uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_charging_current)
++		return chg_dev->ops->get_charging_current(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_charging_current);
++
++int charger_dev_get_min_charging_current(struct charger_device *chg_dev,
++					 u32 *uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_min_charging_current)
++		return chg_dev->ops->get_min_charging_current(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_min_charging_current);
++
++int charger_dev_enable_chip(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_chip)
++		return chg_dev->ops->enable_chip(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_chip);
++
++int charger_dev_is_chip_enabled(struct charger_device *chg_dev, bool *en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->is_chip_enabled)
++		return chg_dev->ops->is_chip_enabled(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_is_chip_enabled);
++
++int charger_dev_enable_direct_charging(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_direct_charging)
++		return chg_dev->ops->enable_direct_charging(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_direct_charging);
++
++int charger_dev_kick_direct_charging_wdt(struct charger_device *chg_dev)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->kick_direct_charging_wdt)
++		return chg_dev->ops->kick_direct_charging_wdt(chg_dev);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_kick_direct_charging_wdt);
++
++int charger_dev_get_vbus(struct charger_device *chg_dev, u32 *vbus)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_vbus_adc)
++		return chg_dev->ops->get_vbus_adc(chg_dev, vbus);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_vbus);
++
++int charger_dev_get_ibus(struct charger_device *chg_dev, u32 *ibus)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_ibus_adc)
++		return chg_dev->ops->get_ibus_adc(chg_dev, ibus);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_ibus);
++
++int charger_dev_get_ibat(struct charger_device *chg_dev, u32 *ibat)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_ibat_adc)
++		return chg_dev->ops->get_ibat_adc(chg_dev, ibat);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_ibat);
++
++int charger_dev_get_temperature(struct charger_device *chg_dev, int *tchg_min,
++		int *tchg_max)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_tchg_adc)
++		return chg_dev->ops->get_tchg_adc(chg_dev, tchg_min,
++						  tchg_max);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_temperature);
++
++int charger_dev_set_input_current(struct charger_device *chg_dev, u32 uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->set_input_current)
++		return chg_dev->ops->set_input_current(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_input_current);
++
++int charger_dev_get_input_current(struct charger_device *chg_dev, u32 *uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_input_current)
++		return chg_dev->ops->get_input_current(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_input_current);
++
++int charger_dev_get_min_input_current(struct charger_device *chg_dev, u32 *uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_min_input_current)
++		return chg_dev->ops->get_min_input_current(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_min_input_current);
++
++int charger_dev_set_eoc_current(struct charger_device *chg_dev, u32 uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->set_eoc_current)
++		chg_dev->ops->set_eoc_current(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_eoc_current);
++
++int charger_dev_get_eoc_current(struct charger_device *chg_dev, u32 *uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_eoc_current)
++		return chg_dev->ops->get_eoc_current(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_eoc_current);
++
++int charger_dev_kick_wdt(struct charger_device *chg_dev)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->kick_wdt)
++		return chg_dev->ops->kick_wdt(chg_dev);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_kick_wdt);
++
++int charger_dev_set_constant_voltage(struct charger_device *chg_dev, u32 uV)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->set_constant_voltage)
++		return chg_dev->ops->set_constant_voltage(chg_dev, uV);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_constant_voltage);
++
++int charger_dev_get_constant_voltage(struct charger_device *chg_dev, u32 *uV)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_constant_voltage)
++		return chg_dev->ops->get_constant_voltage(chg_dev, uV);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_constant_voltage);
++
++int charger_dev_dump_registers(struct charger_device *chg_dev)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->dump_registers)
++		return chg_dev->ops->dump_registers(chg_dev);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_dump_registers);
++
++int charger_dev_is_charging_done(struct charger_device *chg_dev, bool *done)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->is_charging_done)
++		return chg_dev->ops->is_charging_done(chg_dev, done);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_is_charging_done);
++
++int charger_dev_enable_vbus_ovp(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_vbus_ovp)
++		return chg_dev->ops->enable_vbus_ovp(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_vbus_ovp);
++
++int charger_dev_set_mivr(struct charger_device *chg_dev, u32 uV)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->set_mivr)
++		return chg_dev->ops->set_mivr(chg_dev, uV);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_mivr);
++
++int charger_dev_get_mivr(struct charger_device *chg_dev, u32 *uV)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->get_mivr)
++		return chg_dev->ops->get_mivr(chg_dev, uV);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_mivr);
++
++int charger_dev_enable_powerpath(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_powerpath)
++		return chg_dev->ops->enable_powerpath(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_powerpath);
++
++int charger_dev_is_powerpath_enabled(struct charger_device *chg_dev, bool *en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->is_powerpath_enabled)
++		return chg_dev->ops->is_powerpath_enabled(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_is_powerpath_enabled);
++
++int charger_dev_enable_safety_timer(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_safety_timer)
++		return chg_dev->ops->enable_safety_timer(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_safety_timer);
++
++int charger_dev_get_adc(struct charger_device *charger_dev,
++	enum adc_channel chan, int *min, int *max)
++{
++	if (charger_dev != NULL && charger_dev->ops != NULL &&
++	    charger_dev->ops->get_adc)
++		return charger_dev->ops->get_adc(charger_dev, chan, min, max);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_adc);
++
++int charger_dev_is_safety_timer_enabled(struct charger_device *chg_dev,
++					bool *en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->is_safety_timer_enabled)
++		return chg_dev->ops->is_safety_timer_enabled(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_is_safety_timer_enabled);
++
++int charger_dev_enable_termination(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_termination)
++		return chg_dev->ops->enable_termination(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_termination);
++
++int charger_dev_get_mivr_state(struct charger_device *chg_dev, bool *in_loop)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->get_mivr_state)
++		return chg_dev->ops->get_mivr_state(chg_dev, in_loop);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_mivr_state);
++
++int charger_dev_send_ta_current_pattern(struct charger_device *chg_dev,
++					bool is_increase)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->send_ta_current_pattern)
++		return chg_dev->ops->send_ta_current_pattern(chg_dev,
++							     is_increase);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_send_ta_current_pattern);
++
++int charger_dev_send_ta20_current_pattern(struct charger_device *chg_dev,
++					  u32 uV)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->send_ta20_current_pattern)
++		return chg_dev->ops->send_ta20_current_pattern(chg_dev, uV);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_send_ta20_current_pattern);
++
++int charger_dev_reset_ta(struct charger_device *chg_dev)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->reset_ta)
++		return chg_dev->ops->reset_ta(chg_dev);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_reset_ta);
++
++int charger_dev_set_pe20_efficiency_table(struct charger_device *chg_dev)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->set_pe20_efficiency_table)
++		return chg_dev->ops->set_pe20_efficiency_table(chg_dev);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_pe20_efficiency_table);
++
++int charger_dev_enable_cable_drop_comp(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_cable_drop_comp)
++		return chg_dev->ops->enable_cable_drop_comp(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_cable_drop_comp);
++
++int charger_dev_set_direct_charging_ibusoc(struct charger_device *chg_dev,
++					   u32 uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->set_direct_charging_ibusoc)
++		return chg_dev->ops->set_direct_charging_ibusoc(chg_dev,
++								uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_direct_charging_ibusoc);
++
++int charger_dev_set_direct_charging_vbusov(struct charger_device *chg_dev,
++					   u32 uV)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->set_direct_charging_vbusov)
++		return chg_dev->ops->set_direct_charging_vbusov(chg_dev,
++								uV);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_direct_charging_vbusov);
++
++int charger_dev_enable_chg_type_det(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_chg_type_det)
++		return chg_dev->ops->enable_chg_type_det(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_chg_type_det);
++
++int charger_dev_enable_otg(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->enable_otg)
++		return chg_dev->ops->enable_otg(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_otg);
++
++int charger_dev_enable_discharge(struct charger_device *chg_dev, bool en)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->enable_discharge)
++		return chg_dev->ops->enable_discharge(chg_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_discharge);
++
++int charger_dev_set_boost_current_limit(struct charger_device *chg_dev, u32 uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->set_boost_current_limit)
++		return chg_dev->ops->set_boost_current_limit(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_boost_current_limit);
++
++int charger_dev_get_zcv(struct charger_device *chg_dev, u32 *uV)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->get_zcv)
++		return chg_dev->ops->get_zcv(chg_dev, uV);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_zcv);
++
++int charger_dev_run_aicl(struct charger_device *chg_dev, u32 *uA)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL && chg_dev->ops->run_aicl)
++		return chg_dev->ops->run_aicl(chg_dev, uA);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_run_aicl);
++
++int charger_dev_reset_eoc_state(struct charger_device *chg_dev)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->reset_eoc_state)
++		return chg_dev->ops->reset_eoc_state(chg_dev);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_reset_eoc_state);
++
++int charger_dev_safety_check(struct charger_device *chg_dev, u32 polling_ieoc)
++{
++	if (chg_dev != NULL && chg_dev->ops != NULL &&
++	    chg_dev->ops->safety_check)
++		return chg_dev->ops->safety_check(chg_dev, polling_ieoc);
++
++	return -ENOTSUPP;
++}
++
++int charger_dev_notify(struct charger_device *chg_dev, int event)
++{
++	return srcu_notifier_call_chain(
++		&chg_dev->evt_nh, event, &chg_dev->noti);
++}
++
++int charger_dev_enable_usbid(struct charger_device *charger_dev, bool en)
++{
++	if (charger_dev != NULL && charger_dev->ops != NULL &&
++	    charger_dev->ops->enable_usbid)
++		return charger_dev->ops->enable_usbid(charger_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_usbid);
++
++int charger_dev_set_usbid_rup(struct charger_device *charger_dev, u32 rup)
++{
++	if (charger_dev != NULL && charger_dev->ops != NULL &&
++	    charger_dev->ops->set_usbid_rup)
++		return charger_dev->ops->set_usbid_rup(charger_dev, rup);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_usbid_rup);
++
++int charger_dev_set_usbid_src_ton(struct charger_device *charger_dev,
++				  u32 src_ton)
++{
++	if (charger_dev != NULL && charger_dev->ops != NULL &&
++	    charger_dev->ops->set_usbid_src_ton)
++		return charger_dev->ops->set_usbid_src_ton(charger_dev,
++							   src_ton);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_set_usbid_src_ton);
++
++int charger_dev_enable_usbid_floating(struct charger_device *charger_dev,
++				      bool en)
++{
++	if (charger_dev != NULL && charger_dev->ops != NULL &&
++	    charger_dev->ops->enable_usbid_floating)
++		return charger_dev->ops->enable_usbid_floating(charger_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_usbid_floating);
++
++int charger_dev_enable_force_typec_otp(struct charger_device *charger_dev,
++				       bool en)
++{
++	if (charger_dev != NULL && charger_dev->ops != NULL &&
++	    charger_dev->ops->enable_force_typec_otp)
++		return charger_dev->ops->enable_force_typec_otp(charger_dev,
++								en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_force_typec_otp);
++
++int charger_dev_get_ctd_dischg_status(struct charger_device *charger_dev,
++				      u8 *status)
++{
++	if (charger_dev != NULL && charger_dev->ops != NULL &&
++	    charger_dev->ops->get_ctd_dischg_status)
++		return charger_dev->ops->get_ctd_dischg_status(charger_dev,
++							       status);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_get_ctd_dischg_status);
++
++int charger_dev_enable_hidden_mode(struct charger_device *charger_dev, bool en)
++{
++	if (charger_dev != NULL && charger_dev->ops != NULL &&
++					   charger_dev->ops->enable_hidden_mode)
++		return charger_dev->ops->enable_hidden_mode(charger_dev, en);
++
++	return -ENOTSUPP;
++}
++EXPORT_SYMBOL(charger_dev_enable_hidden_mode);
++
++static DEVICE_ATTR_RO(name);
++
++static struct attribute *charger_class_attrs[] = {
++	&dev_attr_name.attr,
++	NULL,
++};
++
++static const struct attribute_group charger_group = {
++	.attrs = charger_class_attrs,
++};
++
++static const struct attribute_group *charger_groups[] = {
++	&charger_group,
++	NULL,
++};
++
++int register_charger_device_notifier(struct charger_device *chg_dev,
++				struct notifier_block *nb)
++{
++	int ret;
++
++	ret = srcu_notifier_chain_register(&chg_dev->evt_nh, nb);
++	return ret;
++}
++EXPORT_SYMBOL(register_charger_device_notifier);
++
++int unregister_charger_device_notifier(struct charger_device *chg_dev,
++				struct notifier_block *nb)
++{
++	return srcu_notifier_chain_unregister(&chg_dev->evt_nh, nb);
++}
++EXPORT_SYMBOL(unregister_charger_device_notifier);
++
++/**
++ * charger_device_register - create and register a new object of
++ *   charger_device class.
++ * @name: the name of the new object
++ * @parent: a pointer to the parent device
++ * @devdata: an optional pointer to be stored for private driver use.
++ * The methods may retrieve it by using charger_get_data(charger_dev).
++ * @ops: the charger operations structure.
++ *
++ * Creates and registers new charger device. Returns either an
++ * ERR_PTR() or a pointer to the newly allocated device.
++ */
++struct charger_device *charger_device_register(const char *name,
++		struct device *parent, void *devdata,
++		const struct charger_ops *ops,
++		const struct charger_properties *props)
++{
++	struct charger_device *chg_dev;
++	static struct lock_class_key key;
++	struct srcu_notifier_head *head;
++	int rc;
++
++	pr_debug("%s: name=%s\n", __func__, name);
++	chg_dev = kzalloc(sizeof(*chg_dev), GFP_KERNEL);
++	if (!chg_dev)
++		return ERR_PTR(-ENOMEM);
++
++	head = &chg_dev->evt_nh;
++	srcu_init_notifier_head(head);
++	/* Rename srcu's lock to avoid LockProve warning */
++	lockdep_init_map(&(&head->srcu)->dep_map, name, &key, 0);
++	mutex_init(&chg_dev->ops_lock);
++	chg_dev->dev.class = charger_class;
++	chg_dev->dev.parent = parent;
++	chg_dev->dev.release = charger_device_release;
++	dev_set_name(&chg_dev->dev, name);
++	dev_set_drvdata(&chg_dev->dev, devdata);
++
++	/* Copy properties */
++	if (props) {
++		memcpy(&chg_dev->props, props,
++		       sizeof(struct charger_properties));
++	}
++	rc = device_register(&chg_dev->dev);
++	if (rc) {
++		kfree(chg_dev);
++		return ERR_PTR(rc);
++	}
++	chg_dev->ops = ops;
++	return chg_dev;
++}
++EXPORT_SYMBOL(charger_device_register);
++
++/**
++ * charger_device_unregister - unregisters a switching charger device
++ * object.
++ * @charger_dev: the switching charger device object to be unregistered
++ * and freed.
++ *
++ * Unregisters a previously registered via charger_device_register object.
++ */
++void charger_device_unregister(struct charger_device *chg_dev)
++{
++	if (!chg_dev)
++		return;
++
++	mutex_lock(&chg_dev->ops_lock);
++	chg_dev->ops = NULL;
++	mutex_unlock(&chg_dev->ops_lock);
++	device_unregister(&chg_dev->dev);
++}
++EXPORT_SYMBOL(charger_device_unregister);
++
++
++static int charger_match_device_by_name(struct device *dev,
++	const void *data)
++{
++	const char *name = data;
++
++	return strcmp(dev_name(dev), name) == 0;
++}
++
++struct charger_device *get_charger_by_name(const char *name)
++{
++	struct device *dev;
++
++	if (!name)
++		return (struct charger_device *)NULL;
++	dev = class_find_device(charger_class, NULL, name,
++				charger_match_device_by_name);
++
++	return dev ? to_charger_device(dev) : NULL;
++
++}
++EXPORT_SYMBOL(get_charger_by_name);
++
++static void __exit charger_class_exit(void)
++{
++	class_destroy(charger_class);
++}
++
++static int __init charger_class_init(void)
++{
++	charger_class = class_create(THIS_MODULE, "switching_charger");
++	if (IS_ERR(charger_class)) {
++		pr_notice("Unable to create charger class; errno = %ld\n",
++			PTR_ERR(charger_class));
++		return PTR_ERR(charger_class);
++	}
++	charger_class->dev_groups = charger_groups;
++	return 0;
++}
++
++subsys_initcall(charger_class_init);
++module_exit(charger_class_exit);
++
++MODULE_DESCRIPTION("Switching Charger Class Device");
++MODULE_AUTHOR("Patrick Chang <patrick_chang@richtek.com>");
++MODULE_VERSION("1.0.0_G");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/power/supply/charger_class.h b/drivers/power/supply/charger_class.h
+new file mode 100755
+index 000000000000..39fbca3b7075
+--- /dev/null
++++ b/drivers/power/supply/charger_class.h
+@@ -0,0 +1,320 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (c) 2019 MediaTek Inc.
++ */
++
++#ifndef LINUX_POWER_CHARGER_CLASS_H
++#define LINUX_POWER_CHARGER_CLASS_H
++
++#include <linux/kernel.h>
++#include <linux/device.h>
++#include <linux/mutex.h>
++
++enum adc_channel {
++	ADC_CHANNEL_VBUS,
++	ADC_CHANNEL_VSYS,
++	ADC_CHANNEL_VBAT,
++	ADC_CHANNEL_IBUS,
++	ADC_CHANNEL_IBAT,
++	ADC_CHANNEL_TEMP_JC,
++	ADC_CHANNEL_USBID,
++	ADC_CHANNEL_TS,
++};
++
++struct charger_properties {
++	const char *alias_name;
++};
++
++/* Data of notifier from charger device */
++struct chgdev_notify {
++	bool vbusov_stat;
++};
++
++/* charger_dev notify */
++enum {
++	CHARGER_DEV_NOTIFY_VBUS_OVP,
++	CHARGER_DEV_NOTIFY_BAT_OVP,
++	CHARGER_DEV_NOTIFY_EOC,
++	CHARGER_DEV_NOTIFY_RECHG,
++	CHARGER_DEV_NOTIFY_SAFETY_TIMEOUT,
++};
++
++struct charger_device {
++	struct charger_properties props;
++	struct chgdev_notify noti;
++	const struct charger_ops *ops;
++	struct mutex ops_lock;
++	struct device dev;
++	struct srcu_notifier_head evt_nh;
++	void	*driver_data;
++	bool is_polling_mode;
++};
++
++struct charger_ops {
++	int (*suspend)(struct charger_device *dev, pm_message_t state);
++	int (*resume)(struct charger_device *dev);
++
++	/* cable plug in/out */
++	int (*plug_in)(struct charger_device *dev);
++	int (*plug_out)(struct charger_device *dev);
++
++	/* enable/disable charger */
++	int (*enable)(struct charger_device *dev, bool en);
++	int (*is_enabled)(struct charger_device *dev, bool *en);
++
++	/* enable/disable chip */
++	int (*enable_chip)(struct charger_device *dev, bool en);
++	int (*is_chip_enabled)(struct charger_device *dev, bool *en);
++
++	/* get/set charging current*/
++	int (*get_charging_current)(struct charger_device *dev, u32 *uA);
++	int (*set_charging_current)(struct charger_device *dev, u32 uA);
++	int (*get_min_charging_current)(struct charger_device *dev, u32 *uA);
++
++	/* set cv */
++	int (*set_constant_voltage)(struct charger_device *dev, u32 uV);
++	int (*get_constant_voltage)(struct charger_device *dev, u32 *uV);
++
++	/* set input_current */
++	int (*get_input_current)(struct charger_device *dev, u32 *uA);
++	int (*set_input_current)(struct charger_device *dev, u32 uA);
++	int (*get_min_input_current)(struct charger_device *dev, u32 *uA);
++
++	/* set termination current */
++	int (*get_eoc_current)(struct charger_device *dev, u32 *uA);
++	int (*set_eoc_current)(struct charger_device *dev, u32 uA);
++
++	/* kick wdt */
++	int (*kick_wdt)(struct charger_device *dev);
++
++	int (*event)(struct charger_device *dev, u32 event, u32 args);
++
++	/* PE+/PE+2.0 */
++	int (*send_ta_current_pattern)(struct charger_device *dev, bool is_inc);
++	int (*send_ta20_current_pattern)(struct charger_device *dev, u32 uV);
++	int (*reset_ta)(struct charger_device *dev);
++	int (*enable_cable_drop_comp)(struct charger_device *dev, bool en);
++
++	int (*set_mivr)(struct charger_device *dev, u32 uV);
++	int (*get_mivr)(struct charger_device *dev, u32 *uV);
++	int (*get_mivr_state)(struct charger_device *dev, bool *in_loop);
++
++	/* enable/disable powerpath */
++	int (*is_powerpath_enabled)(struct charger_device *dev, bool *en);
++	int (*enable_powerpath)(struct charger_device *dev, bool en);
++
++	/* enable/disable vbus ovp */
++	int (*enable_vbus_ovp)(struct charger_device *dev, bool en);
++
++	/* enable/disable charging safety timer */
++	int (*is_safety_timer_enabled)(struct charger_device *dev, bool *en);
++	int (*enable_safety_timer)(struct charger_device *dev, bool en);
++
++	/* enable term */
++	int (*enable_termination)(struct charger_device *dev, bool en);
++
++	/* direct charging */
++	int (*enable_direct_charging)(struct charger_device *dev, bool en);
++	int (*kick_direct_charging_wdt)(struct charger_device *dev);
++	int (*set_direct_charging_ibusoc)(struct charger_device *dev, u32 uA);
++	int (*set_direct_charging_vbusov)(struct charger_device *dev, u32 uV);
++
++	/* OTG */
++	int (*enable_otg)(struct charger_device *dev, bool en);
++	int (*enable_discharge)(struct charger_device *dev, bool en);
++	int (*set_boost_current_limit)(struct charger_device *dev, u32 uA);
++
++	/* charger type detection */
++	int (*enable_chg_type_det)(struct charger_device *dev, bool en);
++
++	/* run AICL */
++	int (*run_aicl)(struct charger_device *dev, u32 *uA);
++
++	/* reset EOC state */
++	int (*reset_eoc_state)(struct charger_device *dev);
++
++	int (*safety_check)(struct charger_device *dev, u32 polling_ieoc);
++
++	int (*is_charging_done)(struct charger_device *dev, bool *done);
++	int (*set_pe20_efficiency_table)(struct charger_device *dev);
++	int (*dump_registers)(struct charger_device *dev);
++
++	int (*get_adc)(struct charger_device *dev, enum adc_channel chan,
++		       int *min, int *max);
++	int (*get_vbus_adc)(struct charger_device *dev, u32 *vbus);
++	int (*get_ibus_adc)(struct charger_device *dev, u32 *ibus);
++	int (*get_ibat_adc)(struct charger_device *dev, u32 *ibat);
++	int (*get_tchg_adc)(struct charger_device *dev, int *tchg_min,
++		int *tchg_max);
++	int (*get_zcv)(struct charger_device *dev, u32 *uV);
++
++	/* TypeC */
++	int (*enable_usbid)(struct charger_device *dev, bool en);
++	int (*set_usbid_rup)(struct charger_device *dev, u32 rup);
++	int (*set_usbid_src_ton)(struct charger_device *dev, u32 src_ton);
++	int (*enable_usbid_floating)(struct charger_device *dev, bool en);
++	int (*enable_force_typec_otp)(struct charger_device *dev, bool en);
++	int (*enable_hidden_mode)(struct charger_device *dev, bool en);
++	int (*get_ctd_dischg_status)(struct charger_device *dev, u8 *status);
++};
++
++static inline void *charger_dev_get_drvdata(
++	const struct charger_device *charger_dev)
++{
++	return charger_dev->driver_data;
++}
++
++static inline void charger_dev_set_drvdata(
++	struct charger_device *charger_dev, void *data)
++{
++	charger_dev->driver_data = data;
++}
++
++extern struct charger_device *charger_device_register(
++	const char *name,
++	struct device *parent, void *devdata, const struct charger_ops *ops,
++	const struct charger_properties *props);
++extern void charger_device_unregister(
++	struct charger_device *charger_dev);
++extern struct charger_device *get_charger_by_name(
++	const char *name);
++
++#define to_charger_device(obj) container_of(obj, struct charger_device, dev)
++
++static inline void *charger_get_data(
++	struct charger_device *charger_dev)
++{
++	return dev_get_drvdata(&charger_dev->dev);
++}
++
++extern int charger_dev_enable(struct charger_device *charger_dev, bool en);
++extern int charger_dev_is_enabled(struct charger_device *charger_dev, bool *en);
++extern int charger_dev_plug_in(struct charger_device *charger_dev);
++extern int charger_dev_plug_out(struct charger_device *charger_dev);
++extern int charger_dev_set_charging_current(
++	struct charger_device *charger_dev, u32 uA);
++extern int charger_dev_get_charging_current(
++	struct charger_device *charger_dev, u32 *uA);
++extern int charger_dev_get_min_charging_current(
++	struct charger_device *charger_dev, u32 *uA);
++extern int charger_dev_set_input_current(
++	struct charger_device *charger_dev, u32 uA);
++extern int charger_dev_get_input_current(
++	struct charger_device *charger_dev, u32 *uA);
++extern int charger_dev_get_min_input_current(
++	struct charger_device *charger_dev, u32 *uA);
++extern int charger_dev_set_eoc_current(
++	struct charger_device *charger_dev, u32 uA);
++extern int charger_dev_get_eoc_current(
++	struct charger_device *charger_dev, u32 *uA);
++extern int charger_dev_kick_wdt(
++	struct charger_device *charger_dev);
++extern int charger_dev_set_constant_voltage(
++	struct charger_device *charger_dev, u32 uV);
++extern int charger_dev_get_constant_voltage(
++	struct charger_device *charger_dev, u32 *uV);
++extern int charger_dev_dump_registers(
++	struct charger_device *charger_dev);
++extern int charger_dev_enable_vbus_ovp(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_set_mivr(
++	struct charger_device *charger_dev, u32 uV);
++extern int charger_dev_get_mivr(
++	struct charger_device *charger_dev, u32 *uV);
++extern int charger_dev_get_mivr_state(
++	struct charger_device *charger_dev, bool *in_loop);
++extern int charger_dev_do_event(
++	struct charger_device *charger_dev, u32 event, u32 args);
++extern int charger_dev_is_powerpath_enabled(
++	struct charger_device *charger_dev, bool *en);
++extern int charger_dev_is_safety_timer_enabled(
++	struct charger_device *charger_dev, bool *en);
++extern int charger_dev_enable_termination(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_is_charging_done(
++	struct charger_device *charger_dev, bool *done);
++extern int charger_dev_enable_powerpath(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_enable_safety_timer(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_enable_chg_type_det(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_enable_otg(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_enable_discharge(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_set_boost_current_limit(
++	struct charger_device *charger_dev, u32 uA);
++extern int charger_dev_get_zcv(
++	struct charger_device *charger_dev, u32 *uV);
++extern int charger_dev_run_aicl(
++	struct charger_device *charger_dev, u32 *uA);
++extern int charger_dev_reset_eoc_state(
++	struct charger_device *charger_dev);
++extern int charger_dev_safety_check(
++	struct charger_device *charger_dev, u32 polling_ieoc);
++
++/* PE+/PE+2.0 */
++extern int charger_dev_send_ta_current_pattern(
++	struct charger_device *charger_dev, bool is_increase);
++extern int charger_dev_send_ta20_current_pattern(
++	struct charger_device *charger_dev, u32 uV);
++extern int charger_dev_reset_ta(
++	struct charger_device *charger_dev);
++extern int charger_dev_set_pe20_efficiency_table(
++	struct charger_device *charger_dev);
++extern int charger_dev_enable_cable_drop_comp(
++	struct charger_device *charger_dev, bool en);
++
++/* PE 3.0 */
++extern int charger_dev_enable_chip(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_is_chip_enabled(
++	struct charger_device *charger_dev, bool *en);
++extern int charger_dev_enable_direct_charging(
++	struct charger_device *charger_dev, bool en);
++extern int charger_dev_kick_direct_charging_wdt(
++	struct charger_device *charger_dev);
++extern int charger_dev_get_adc(struct charger_device *charger_dev,
++	enum adc_channel chan, int *min, int *max);
++/* Prefer use charger_dev_get_adc api */
++extern int charger_dev_get_vbus(
++	struct charger_device *charger_dev, u32 *vbus);
++extern int charger_dev_get_ibus(
++	struct charger_device *charger_dev, u32 *ibus);
++extern int charger_dev_get_ibat(
++	struct charger_device *charger_dev, u32 *ibat);
++extern int charger_dev_get_temperature(
++	struct charger_device *charger_dev, int *tchg_min,
++		int *tchg_max);
++extern int charger_dev_set_direct_charging_ibusoc(
++	struct charger_device *charger_dev, u32 ua);
++extern int charger_dev_set_direct_charging_vbusov(
++	struct charger_device *charger_dev, u32 uv);
++
++/* TypeC */
++extern int charger_dev_enable_usbid(struct charger_device *dev, bool en);
++extern int charger_dev_set_usbid_rup(struct charger_device *dev, u32 rup);
++extern int charger_dev_set_usbid_src_ton(struct charger_device *dev,
++					 u32 src_ton);
++extern int charger_dev_enable_usbid_floating(struct charger_device *dev,
++					     bool en);
++extern int charger_dev_enable_force_typec_otp(struct charger_device *dev,
++					      bool en);
++extern int charger_dev_get_ctd_dischg_status(struct charger_device *dev,
++					     u8 *status);
++
++/* For buck1 FPWM */
++extern int charger_dev_enable_hidden_mode(struct charger_device *dev, bool en);
++
++extern int register_charger_device_notifier(
++	struct charger_device *charger_dev,
++			      struct notifier_block *nb);
++extern int unregister_charger_device_notifier(
++	struct charger_device *charger_dev,
++				struct notifier_block *nb);
++extern int charger_dev_notify(
++	struct charger_device *charger_dev, int event);
++
++
++#endif /*LINUX_POWER_CHARGER_CLASS_H*/
+diff --git a/drivers/power/supply/sc8989x_charger.c b/drivers/power/supply/sc8989x_charger.c
+new file mode 100755
+index 000000000000..805a5a311226
+--- /dev/null
++++ b/drivers/power/supply/sc8989x_charger.c
+@@ -0,0 +1,1589 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (c) 2022 Southchip Semiconductor Technology(Shanghai) Co., Ltd.
++ */
++
++#include <linux/gpio.h>
++#include <linux/i2c.h>
++#include <linux/init.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/power_supply.h>
++#include <linux/slab.h>
++#include <linux/kernel.h>
++#include <linux/sched.h>
++#include <linux/kthread.h>
++#include <linux/delay.h>
++#include <linux/of_gpio.h>
++#include "sc8989x_reg.h"
++
++enum sc89890h_vbus_type {
++    SC89890H_VBUS_NONE,
++    SC89890H_VBUS_USB_SDP,
++    SC89890H_VBUS_USB_CDP,
++    SC89890H_VBUS_USB_DCP,
++    SC89890H_VBUS_HVDCP,
++    SC89890H_VBUS_UNKNOWN,
++    SC89890H_VBUS_NONSTAND,
++    SC89890H_VBUS_OTG,
++    SC89890H_VBUS_TYPE_NUM,
++};
++
++enum sc89890h_part_no {
++    SC89890H = 0x04,
++};
++
++
++#define SC89890H_STATUS_PLUGIN          0x0001
++#define SC89890H_STATUS_PG              0x0002
++#define	SC89890H_STATUS_CHARGE_ENABLE   0x0004
++#define SC89890H_STATUS_FAULT           0x0008
++
++struct sc89890h_config {
++    bool enable_auto_dpdm;
++/*	bool enable_12v;*/
++
++    int input_limit_current;
++
++    int charge_voltage;
++    int charge_current;
++
++    bool enable_term;
++    int term_current;
++
++    bool enable_ico;
++    bool use_absolute_vindpm;
++};
++
++struct pe_ctrl {
++    bool enable;
++    bool tune_up_volt;
++    bool tune_down_volt;
++    bool tune_done;
++    bool tune_fail;
++    int  tune_count;
++    int  target_volt;
++    int	 high_volt_level;/* vbus volt > this threshold means tune up successfully */
++    int  low_volt_level; /* vbus volt < this threshold means tune down successfully */
++    int  vbat_min_volt;  /* to tune up voltage only when vbat > this threshold */
++};
++
++struct sc89890h {
++    struct device *dev;
++    struct i2c_client *client;
++    enum sc89890h_part_no part_no;
++    struct pe_ctrl pe;
++
++    unsigned int status;
++    int vbus_type;
++
++    bool enabled;
++
++    int vbus_volt;
++    int vbat_volt;
++
++    int rsoc;
++
++    struct mutex sc89890h_i2c_lock;
++
++    struct sc89890h_config	cfg;
++    struct work_struct irq_work;
++    struct work_struct adapter_in_work;
++    struct work_struct adapter_out_work;
++    struct delayed_work monitor_work;
++    struct delayed_work ico_work;
++    struct delayed_work pe_volt_tune_work;
++    struct delayed_work check_pe_tuneup_work;
++
++    struct power_supply_desc psy_desc;
++	struct power_supply_config psy_cfg;
++    struct power_supply *usb;
++    struct power_supply *wall;
++    struct power_supply *batt_psy;
++};
++
++
++
++static int sc89890h_read_byte(struct sc89890h *sc, u8 *data, u8 reg)
++{
++    int ret;
++
++    mutex_lock(&sc->sc89890h_i2c_lock);
++    ret = i2c_smbus_read_byte_data(sc->client, reg);
++    if (ret < 0) {
++        dev_err(sc->dev, "failed to read 0x%.2x\n", reg);
++        mutex_unlock(&sc->sc89890h_i2c_lock);
++        return ret;
++    }
++
++    *data = (u8)ret;
++    mutex_unlock(&sc->sc89890h_i2c_lock);
++
++    return 0;
++}
++
++static int sc89890h_write_byte(struct sc89890h *sc, u8 reg, u8 data)
++{
++    int ret;
++    mutex_lock(&sc->sc89890h_i2c_lock);
++    ret = i2c_smbus_write_byte_data(sc->client, reg, data);
++    mutex_unlock(&sc->sc89890h_i2c_lock);
++    return ret;
++}
++
++static int sc89890h_update_bits(struct sc89890h *sc, u8 reg, u8 mask, u8 data)
++{
++    int ret;
++    u8 tmp;
++
++    ret = sc89890h_read_byte(sc, &tmp, reg);
++
++    if (ret)
++        return ret;
++
++    tmp &= ~mask;
++    tmp |= data & mask;
++
++    return sc89890h_write_byte(sc, reg, tmp);
++}
++
++
++static enum sc89890h_vbus_type sc89890h_get_vbus_type(struct sc89890h *sc)
++{
++    u8 val = 0;
++    int ret;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_0B);
++    if (ret < 0)
++        return 0;
++    val &= SC89890H_VBUS_STAT_MASK;
++    val >>= SC89890H_VBUS_STAT_SHIFT;
++
++    return val;
++}
++
++
++static int sc89890h_enable_otg(struct sc89890h *sc)
++{
++    u8 val = SC89890H_OTG_ENABLE << SC89890H_OTG_CONFIG_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_03,
++                            SC89890H_OTG_CONFIG_MASK, val);
++
++}
++
++int sc89890h_disable_otg(struct sc89890h *sc)
++{
++    u8 val = SC89890H_OTG_DISABLE << SC89890H_OTG_CONFIG_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_03,
++                            SC89890H_OTG_CONFIG_MASK, val);
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_disable_otg);
++
++int sc89890h_set_otg_volt(struct sc89890h *sc, int volt)
++{
++    u8 val = 0;
++
++    if (volt < SC89890H_BOOSTV_BASE)
++        volt = SC89890H_BOOSTV_BASE;
++    if (volt > SC89890H_BOOSTV_BASE + (SC89890H_BOOSTV_MASK >> SC89890H_BOOSTV_SHIFT) * SC89890H_BOOSTV_LSB)
++        volt = SC89890H_BOOSTV_BASE + (SC89890H_BOOSTV_MASK >> SC89890H_BOOSTV_SHIFT) * SC89890H_BOOSTV_LSB;
++
++    val = ((volt - SC89890H_BOOSTV_BASE) / SC89890H_BOOSTV_LSB) << SC89890H_BOOSTV_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_0A, SC89890H_BOOSTV_MASK, val);
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_otg_volt);
++
++int sc89890h_set_otg_current(struct sc89890h *sc, int curr)
++{
++    u8 temp;
++
++    if (curr == 500)
++        temp = SC89890H_BOOST_LIM_500MA;
++    else if (curr == 750)
++        temp = SC89890H_BOOST_LIM_750MA;
++    else if (curr == 1200)
++        temp = SC89890H_BOOST_LIM_1200MA;
++    else if (curr == 1650)
++        temp = SC89890H_BOOST_LIM_1650MA;
++    else if (curr == 1875)
++        temp = SC89890H_BOOST_LIM_1875MA;
++    else if (curr == 2150)
++        temp = SC89890H_BOOST_LIM_2150MA;
++    else if (curr == 2450)
++        temp = SC89890H_BOOST_LIM_2450MA;
++    else
++        temp = SC89890H_BOOST_LIM_1400MA;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_0A, SC89890H_BOOST_LIM_MASK, temp << SC89890H_BOOST_LIM_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_otg_current);
++
++static int sc89890h_enable_charger(struct sc89890h *sc)
++{
++    int ret;
++    u8 val = SC89890H_CHG_ENABLE << SC89890H_CHG_CONFIG_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_03, SC89890H_CHG_CONFIG_MASK, val);
++    if (ret == 0)
++        sc->status |= SC89890H_STATUS_CHARGE_ENABLE;
++    return ret;
++}
++
++int sc89890h_disable_charger(struct sc89890h *sc)
++{
++    int ret;
++    u8 val = SC89890H_CHG_DISABLE << SC89890H_CHG_CONFIG_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_03, SC89890H_CHG_CONFIG_MASK, val);
++    if (ret == 0)
++        sc->status &= ~SC89890H_STATUS_CHARGE_ENABLE;
++    return ret;
++}
++EXPORT_SYMBOL_GPL(sc89890h_disable_charger);
++
++
++/* interfaces that can be called by other module */
++int sc89890h_adc_start(struct sc89890h *sc, bool oneshot)
++{
++    u8 val;
++    int ret;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_02);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s failed to read register 0x02:%d\n", __func__, ret);
++        return ret;
++    }
++
++    if (((val & SC89890H_CONV_RATE_MASK) >> SC89890H_CONV_RATE_SHIFT) == SC89890H_ADC_CONTINUE_ENABLE)
++        return 0; /*is doing continuous scan*/
++    if (oneshot)
++        ret = sc89890h_update_bits(sc, SC89890H_REG_02, SC89890H_CONV_START_MASK, SC89890H_CONV_START << SC89890H_CONV_START_SHIFT);
++    else
++        ret = sc89890h_update_bits(sc, SC89890H_REG_02, SC89890H_CONV_RATE_MASK,  SC89890H_ADC_CONTINUE_ENABLE << SC89890H_CONV_RATE_SHIFT);
++    return ret;
++}
++EXPORT_SYMBOL_GPL(sc89890h_adc_start);
++
++int sc89890h_adc_stop(struct sc89890h *sc)
++{
++    return sc89890h_update_bits(sc, SC89890H_REG_02, SC89890H_CONV_RATE_MASK, SC89890H_ADC_CONTINUE_DISABLE << SC89890H_CONV_RATE_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_adc_stop);
++
++
++int sc89890h_adc_read_battery_volt(struct sc89890h *sc)
++{
++    uint8_t val;
++    int volt;
++    int ret;
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_0E);
++    if (ret < 0) {
++        dev_err(sc->dev, "read battery voltage failed :%d\n", ret);
++        return ret;
++    } else{
++        volt = SC89890H_BATV_BASE + ((val & SC89890H_BATV_MASK) >> SC89890H_BATV_SHIFT) * SC89890H_BATV_LSB ;
++        return volt;
++    }
++}
++EXPORT_SYMBOL_GPL(sc89890h_adc_read_battery_volt);
++
++
++int sc89890h_adc_read_sys_volt(struct sc89890h *sc)
++{
++    uint8_t val;
++    int volt;
++    int ret;
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_0F);
++    if (ret < 0) {
++        dev_err(sc->dev, "read system voltage failed :%d\n", ret);
++        return ret;
++    } else{
++        volt = SC89890H_SYSV_BASE + ((val & SC89890H_SYSV_MASK) >> SC89890H_SYSV_SHIFT) * SC89890H_SYSV_LSB ;
++        return volt;
++    }
++}
++EXPORT_SYMBOL_GPL(sc89890h_adc_read_sys_volt);
++
++int sc89890h_adc_read_vbus_volt(struct sc89890h *sc)
++{
++    uint8_t val;
++    int volt;
++    int ret;
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_11);
++    if (ret < 0) {
++        dev_err(sc->dev, "read vbus voltage failed :%d\n", ret);
++        return ret;
++    } else{
++        volt = SC89890H_VBUSV_BASE + ((val & SC89890H_VBUSV_MASK) >> SC89890H_VBUSV_SHIFT) * SC89890H_VBUSV_LSB ;
++        return volt;
++    }
++}
++EXPORT_SYMBOL_GPL(sc89890h_adc_read_vbus_volt);
++
++int sc89890h_adc_read_temperature(struct sc89890h *sc)
++{
++    uint8_t val;
++    int temp;
++    int ret;
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_10);
++    if (ret < 0) {
++        dev_err(sc->dev, "read temperature failed :%d\n", ret);
++        return ret;
++    } else{
++        temp = SC89890H_TSPCT_BASE + ((val & SC89890H_TSPCT_MASK) >> SC89890H_TSPCT_SHIFT) * SC89890H_TSPCT_LSB;
++        return temp;
++    }
++}
++EXPORT_SYMBOL_GPL(sc89890h_adc_read_temperature);
++
++int sc89890h_adc_read_charge_current(struct sc89890h *sc)
++{
++    uint8_t val;
++    int volt;
++    int ret;
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_12);
++    if (ret < 0) {
++        dev_err(sc->dev, "read charge current failed :%d\n", ret);
++        return ret;
++    } else{
++        volt = (int)(SC89890H_ICHGR_BASE + ((val & SC89890H_ICHGR_MASK) >> SC89890H_ICHGR_SHIFT) * SC89890H_ICHGR_LSB) ;
++        return volt;
++    }
++}
++EXPORT_SYMBOL_GPL(sc89890h_adc_read_charge_current);
++
++int sc89890h_set_chargecurrent(struct sc89890h *sc, int curr)
++{
++    u8 ichg;
++
++    ichg = (curr - SC89890H_ICHG_BASE)/SC89890H_ICHG_LSB;
++    return sc89890h_update_bits(sc, SC89890H_REG_04, SC89890H_ICHG_MASK, ichg << SC89890H_ICHG_SHIFT);
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_chargecurrent);
++
++int sc89890h_set_term_current(struct sc89890h *sc, int curr)
++{
++    u8 iterm;
++
++    iterm = (curr - SC89890H_ITERM_BASE) / SC89890H_ITERM_LSB;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_05, SC89890H_ITERM_MASK, iterm << SC89890H_ITERM_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_term_current);
++
++
++int sc89890h_set_prechg_current(struct sc89890h *sc, int curr)
++{
++    u8 iprechg;
++
++    iprechg = (curr - SC89890H_IPRECHG_BASE) / SC89890H_IPRECHG_LSB;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_05, SC89890H_IPRECHG_MASK, iprechg << SC89890H_IPRECHG_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_prechg_current);
++
++int sc89890h_set_chargevoltage(struct sc89890h *sc, int volt)
++{
++    u8 val;
++
++    val = (volt - SC89890H_VREG_BASE)/SC89890H_VREG_LSB;
++    return sc89890h_update_bits(sc, SC89890H_REG_06, SC89890H_VREG_MASK, val << SC89890H_VREG_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_chargevoltage);
++
++
++int sc89890h_set_input_volt_limit(struct sc89890h *sc, int volt)
++{
++    u8 val;
++    val = (volt - SC89890H_VINDPM_BASE) / SC89890H_VINDPM_LSB;
++    return sc89890h_update_bits(sc, SC89890H_REG_0D, SC89890H_VINDPM_MASK, val << SC89890H_VINDPM_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_input_volt_limit);
++
++int sc89890h_set_input_current_limit(struct sc89890h *sc, int curr)
++{
++    u8 val;
++
++    val = (curr - SC89890H_IINLIM_BASE) / SC89890H_IINLIM_LSB;
++    return sc89890h_update_bits(sc, SC89890H_REG_00, SC89890H_IINLIM_MASK, val << SC89890H_IINLIM_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_input_current_limit);
++
++int sc89890h_enable_ilimt(struct sc89890h *sc)
++{
++    u8 val = SC89890H_ENILIM_ENABLE << SC89890H_ENILIM_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_00,
++                            SC89890H_ENILIM_MASK, val);
++}
++EXPORT_SYMBOL_GPL(sc89890h_enable_ilimt);
++
++int sc89890h_disable_ilimt(struct sc89890h *sc)
++{
++    u8 val = SC89890H_ENILIM_DISABLE << SC89890H_ENILIM_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_00,
++                            SC89890H_ENILIM_MASK, val);
++}
++EXPORT_SYMBOL_GPL(sc89890h_disable_ilimt);
++
++int sc89890h_set_vbus(struct sc89890h *sc, int vbus)
++{
++    u8 val;
++
++    if (vbus == 9000) {
++        val = SC89890H_HVDCP_9V << SC89890H_DM_DRIVE_SHIFT;
++    } else if (vbus == 12000) {
++        val = SC89890H_HVDCP_12V << SC89890H_DM_DRIVE_SHIFT;
++    } else {
++        val = SC89890H_HVDCP_5V << SC89890H_DM_DRIVE_SHIFT;
++    }
++    
++    return sc89890h_update_bits(sc, SC89890H_REG_01,
++                            SC89890H_DP_DRIVE_MASK | SC89890H_DM_DRIVE_MASK, val);
++}
++
++int sc89890h_set_vindpm_offset(struct sc89890h *sc, int offset)
++{
++    u8 val;
++
++    if (offset < 500) {
++        val = SC89890H_VINDPMOS_400MV;
++    } else {
++        val = SC89890H_VINDPMOS_600MV;
++    }
++    return sc89890h_update_bits(sc, SC89890H_REG_01, SC89890H_VINDPMOS_MASK, val << SC89890H_VINDPMOS_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_vindpm_offset);
++
++int sc89890h_get_charging_status(struct sc89890h *sc)
++{
++    u8 val = 0;
++    int ret;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_0B);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s Failed to read register 0x0b:%d\n", __func__, ret);
++        return ret;
++    }
++    val &= SC89890H_CHRG_STAT_MASK;
++    val >>= SC89890H_CHRG_STAT_SHIFT;
++    return val;
++}
++EXPORT_SYMBOL_GPL(sc89890h_get_charging_status);
++
++void sc89890h_set_otg(struct sc89890h *sc, int enable)
++{
++    int ret;
++
++    if (enable) {
++        ret = sc89890h_disable_charger(sc);
++        ret |= sc89890h_enable_otg(sc);
++        if (ret < 0) {
++            dev_err(sc->dev, "%s:Failed to enable otg-%d\n", __func__, ret);
++            return;
++        }
++    } else{
++        ret = sc89890h_disable_otg(sc);
++        ret |= sc89890h_enable_charger(sc);
++        if (ret < 0)
++            dev_err(sc->dev, "%s:Failed to disable otg-%d\n", __func__, ret);
++    }
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_otg);
++
++int sc89890h_set_watchdog_timer(struct sc89890h *sc, u8 timeout)
++{
++    return sc89890h_update_bits(sc, SC89890H_REG_07, SC89890H_WDT_MASK, (u8)((timeout - SC89890H_WDT_BASE) / SC89890H_WDT_LSB) << SC89890H_WDT_SHIFT);
++}
++EXPORT_SYMBOL_GPL(sc89890h_set_watchdog_timer);
++
++int sc89890h_disable_watchdog_timer(struct sc89890h *sc)
++{
++    u8 val = SC89890H_WDT_DISABLE << SC89890H_WDT_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_07, SC89890H_WDT_MASK, val);
++}
++EXPORT_SYMBOL_GPL(sc89890h_disable_watchdog_timer);
++
++int sc89890h_reset_watchdog_timer(struct sc89890h *sc)
++{
++    u8 val = SC89890H_WDT_RESET << SC89890H_WDT_RESET_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_03, SC89890H_WDT_RESET_MASK, val);
++}
++EXPORT_SYMBOL_GPL(sc89890h_reset_watchdog_timer);
++
++int sc89890h_force_dpdm(struct sc89890h *sc)
++{
++    int ret;
++    u8 val = SC89890H_FORCE_DPDM << SC89890H_FORCE_DPDM_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_02, SC89890H_FORCE_DPDM_MASK, val);
++    if (ret)
++        return ret;
++
++    msleep(20);/*TODO: how much time needed to finish dpdm detect?*/
++    return 0;
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_force_dpdm);
++
++int sc89890h_reset_chip(struct sc89890h *sc)
++{
++    int ret;
++    u8 val = SC89890H_RESET << SC89890H_RESET_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_14, SC89890H_RESET_MASK, val);
++    return ret;
++}
++EXPORT_SYMBOL_GPL(sc89890h_reset_chip);
++
++int sc89890h_enter_ship_mode(struct sc89890h *sc)
++{
++    int ret;
++    u8 val = SC89890H_BATFET_OFF << SC89890H_BATFET_DIS_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_09, SC89890H_BATFET_DIS_MASK, val);
++    return ret;
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_enter_ship_mode);
++
++int sc89890h_enter_hiz_mode(struct sc89890h *sc)
++{
++    u8 val = SC89890H_HIZ_ENABLE << SC89890H_ENHIZ_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_00, SC89890H_ENHIZ_MASK, val);
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_enter_hiz_mode);
++
++int sc89890h_exit_hiz_mode(struct sc89890h *sc)
++{
++
++    u8 val = SC89890H_HIZ_DISABLE << SC89890H_ENHIZ_SHIFT;
++
++    return sc89890h_update_bits(sc, SC89890H_REG_00, SC89890H_ENHIZ_MASK, val);
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_exit_hiz_mode);
++
++int sc89890h_get_hiz_mode(struct sc89890h *sc, u8 *state)
++{
++    u8 val;
++    int ret;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_00);
++    if (ret)
++        return ret;
++    *state = (val & SC89890H_ENHIZ_MASK) >> SC89890H_ENHIZ_SHIFT;
++
++    return 0;
++}
++EXPORT_SYMBOL_GPL(sc89890h_get_hiz_mode);
++
++
++int sc89890h_pumpx_enable(struct sc89890h *sc, int enable)
++{
++    u8 val;
++    int ret;
++
++    if (enable)
++        val = SC89890H_PUMPX_ENABLE << SC89890H_EN_PUMPX_SHIFT;
++    else
++        val = SC89890H_PUMPX_DISABLE << SC89890H_EN_PUMPX_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_04, SC89890H_EN_PUMPX_MASK, val);
++
++    return ret;
++}
++EXPORT_SYMBOL_GPL(sc89890h_pumpx_enable);
++
++int sc89890h_pumpx_increase_volt(struct sc89890h *sc)
++{
++    u8 val;
++    int ret;
++
++    val = SC89890H_PUMPX_UP << SC89890H_PUMPX_UP_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_09, SC89890H_PUMPX_UP_MASK, val);
++
++    return ret;
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_pumpx_increase_volt);
++
++int sc89890h_pumpx_increase_volt_done(struct sc89890h *sc)
++{
++    u8 val;
++    int ret;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_09);
++    if (ret)
++        return ret;
++
++    if (val & SC89890H_PUMPX_UP_MASK)
++        return 1;   /* not finished*/
++    else
++        return 0;   /* pumpx up finished*/
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_pumpx_increase_volt_done);
++
++int sc89890h_pumpx_decrease_volt(struct sc89890h *sc)
++{
++    u8 val;
++    int ret;
++
++    val = SC89890H_PUMPX_DOWN << SC89890H_PUMPX_DOWN_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_09, SC89890H_PUMPX_DOWN_MASK, val);
++
++    return ret;
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_pumpx_decrease_volt);
++
++int sc89890h_pumpx_decrease_volt_done(struct sc89890h *sc)
++{
++    u8 val;
++    int ret;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_09);
++    if (ret)
++        return ret;
++
++    if (val & SC89890H_PUMPX_DOWN_MASK)
++        return 1;   /* not finished*/
++    else
++        return 0;   /* pumpx down finished*/
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_pumpx_decrease_volt_done);
++
++int sc89890h_force_ico(struct sc89890h *sc)
++{
++    u8 val;
++    int ret;
++
++    val = SC89890H_FORCE_ICO << SC89890H_FORCE_ICO_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_09, SC89890H_FORCE_ICO_MASK, val);
++
++    return ret;
++}
++EXPORT_SYMBOL_GPL(sc89890h_force_ico);
++
++int sc89890h_check_force_ico_done(struct sc89890h *sc)
++{
++    u8 val;
++    int ret;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_14);
++    if (ret)
++        return ret;
++
++    if (val & SC89890H_ICO_OPTIMIZED_MASK)
++        return 1;  /*finished*/
++    else
++        return 0;   /* in progress*/
++}
++EXPORT_SYMBOL_GPL(sc89890h_check_force_ico_done);
++
++int sc89890h_enable_term(struct sc89890h* sc, bool enable)
++{
++    u8 val;
++    int ret;
++
++    if (enable)
++        val = SC89890H_TERM_ENABLE << SC89890H_EN_TERM_SHIFT;
++    else
++        val = SC89890H_TERM_DISABLE << SC89890H_EN_TERM_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_07, SC89890H_EN_TERM_MASK, val);
++
++    return ret;
++}
++EXPORT_SYMBOL_GPL(sc89890h_enable_term);
++
++int sc89890h_enable_auto_dpdm(struct sc89890h* sc, bool enable)
++{
++    u8 val;
++    int ret;
++    
++    if (enable)
++        val = SC89890H_AUTO_DPDM_ENABLE << SC89890H_AUTO_DPDM_EN_SHIFT;
++    else
++        val = SC89890H_AUTO_DPDM_DISABLE << SC89890H_AUTO_DPDM_EN_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_02, SC89890H_AUTO_DPDM_EN_MASK, val);
++
++    return ret;
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_enable_auto_dpdm);
++
++int sc89890h_use_absolute_vindpm(struct sc89890h* sc, bool enable)
++{
++    u8 val;
++    int ret;
++    
++    if (enable)
++        val = SC89890H_FORCE_VINDPM_ENABLE << SC89890H_FORCE_VINDPM_SHIFT;
++    else
++        val = SC89890H_FORCE_VINDPM_DISABLE << SC89890H_FORCE_VINDPM_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_0D, SC89890H_FORCE_VINDPM_MASK, val);
++
++    return ret;
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_use_absolute_vindpm);
++
++int sc89890h_enable_ico(struct sc89890h* sc, bool enable)
++{
++    u8 val;
++    int ret;
++    
++    if (enable)
++        val = SC89890H_ICO_ENABLE << SC89890H_ICOEN_SHIFT;
++    else
++        val = SC89890H_ICO_DISABLE << SC89890H_ICOEN_SHIFT;
++
++    ret = sc89890h_update_bits(sc, SC89890H_REG_02, SC89890H_ICOEN_MASK, val);
++
++    return ret;
++
++}
++EXPORT_SYMBOL_GPL(sc89890h_enable_ico);
++
++
++int sc89890h_read_idpm_limit(struct sc89890h *sc)
++{
++    uint8_t val;
++    int curr;
++    int ret;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_13);
++    if (ret < 0) {
++        dev_err(sc->dev, "read vbus voltage failed :%d\n", ret);
++        return ret;
++    } else{
++        curr = SC89890H_IDPM_LIM_BASE + ((val & SC89890H_IDPM_LIM_MASK) >> SC89890H_IDPM_LIM_SHIFT) * SC89890H_IDPM_LIM_LSB ;
++        return curr;
++    }
++}
++EXPORT_SYMBOL_GPL(sc89890h_read_idpm_limit);
++
++bool sc89890h_is_charge_done(struct sc89890h *sc)
++{
++    int ret;
++    u8 val;
++
++    ret = sc89890h_read_byte(sc, &val, SC89890H_REG_0B);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s:read REG0B failed :%d\n", __func__, ret);
++        return false;
++    }
++    val &= SC89890H_CHRG_STAT_MASK;
++    val >>= SC89890H_CHRG_STAT_SHIFT;
++
++    return (val == SC89890H_CHRG_STAT_CHGDONE);
++}
++EXPORT_SYMBOL_GPL(sc89890h_is_charge_done);
++
++static int sc89890h_init_device(struct sc89890h *sc)
++{
++    int ret;
++
++    /*common initialization*/
++    sc89890h_reset_chip(sc);
++
++    sc89890h_disable_watchdog_timer(sc);
++
++    sc89890h_enable_auto_dpdm(sc, sc->cfg.enable_auto_dpdm);
++    // sc89890h_enable_term(sc, sc->cfg.enable_term);
++    sc89890h_enable_ico(sc, sc->cfg.enable_ico);
++    /*force use absolute vindpm if auto_dpdm not enabled*/
++    if (!sc->cfg.enable_auto_dpdm)
++        sc->cfg.use_absolute_vindpm = true;
++    sc89890h_use_absolute_vindpm(sc, sc->cfg.use_absolute_vindpm);
++
++    ret = sc89890h_set_vindpm_offset(sc, 600);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s:Failed to set vindpm offset:%d\n", __func__, ret);
++        return ret;
++    }
++
++    ret = sc89890h_set_term_current(sc, sc->cfg.term_current);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s:Failed to set termination current:%d\n", __func__, ret);
++        return ret;
++    }
++
++    ret = sc89890h_set_chargevoltage(sc, sc->cfg.charge_voltage);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s:Failed to set charge voltage:%d\n", __func__, ret);
++        return ret;
++    }
++
++    ret = sc89890h_set_chargecurrent(sc, sc->cfg.charge_current);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s:Failed to set charge current:%d\n", __func__, ret);
++        return ret;
++    }
++
++    ret = sc89890h_set_input_current_limit(sc, sc->cfg.input_limit_current);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s:Failed to set input current limit:%d\n", __func__, ret);
++        return ret;
++    }
++
++    ret = sc89890h_enable_charger(sc);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s:Failed to enable charger:%d\n", __func__, ret);
++        return ret;
++    }
++
++    sc89890h_adc_start(sc, false);
++
++    // ret = sc89890h_pumpx_enable(sc, 1);
++    // if (ret) {
++    //     dev_err(sc->dev, "%s:Failed to enable pumpx:%d\n", __func__, ret);
++    //     return ret;
++    // }
++
++    sc89890h_set_watchdog_timer(sc, 160);
++
++    sc89890h_disable_ilimt(sc);
++
++    return ret;
++}
++
++
++static int sc89890h_charge_status(struct sc89890h *sc)
++{
++    u8 val = 0;
++
++    sc89890h_read_byte(sc, &val, SC89890H_REG_0B);
++    val &= SC89890H_CHRG_STAT_MASK;
++    val >>= SC89890H_CHRG_STAT_SHIFT;
++    switch (val) {
++    case SC89890H_CHRG_STAT_IDLE:
++        return POWER_SUPPLY_CHARGE_TYPE_NONE;
++    case SC89890H_CHRG_STAT_PRECHG:
++        return POWER_SUPPLY_CHARGE_TYPE_TRICKLE;
++    case SC89890H_CHRG_STAT_FASTCHG:
++        return POWER_SUPPLY_CHARGE_TYPE_FAST;
++    case SC89890H_CHRG_STAT_CHGDONE:
++        printk("Charge Termination \n");
++    default:
++        return POWER_SUPPLY_CHARGE_TYPE_UNKNOWN;
++    }
++}
++
++static enum power_supply_property sc89890h_charger_props[] = {
++    POWER_SUPPLY_PROP_CHARGE_TYPE, /* Charger status output */
++    POWER_SUPPLY_PROP_ONLINE, /* External power source */
++    POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++};
++
++
++static int sc89890h_usb_get_property(struct power_supply *psy,
++            enum power_supply_property psp,
++            union power_supply_propval *val)
++{
++
++    struct sc89890h *sc = power_supply_get_drvdata(psy);
++    u8 type = sc89890h_get_vbus_type(sc);
++
++    switch (psp) {
++    case POWER_SUPPLY_PROP_ONLINE:
++        if (type == SC89890H_VBUS_USB_SDP || type == SC89890H_VBUS_USB_DCP)
++            val->intval = 1;
++        else
++            val->intval = 0;
++        break;
++    case POWER_SUPPLY_PROP_CHARGE_TYPE:
++        val->intval = sc89890h_charge_status(sc);
++        break;
++
++    case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++        val->intval = sc89890h_adc_read_battery_volt(sc);
++		break;
++
++    case POWER_SUPPLY_PROP_CURRENT_NOW:
++        val->intval = sc89890h_adc_read_charge_current(sc);
++		break;
++
++    default:
++        return -EINVAL;
++    }
++
++    return 0;
++}
++
++
++static int sc89890h_wall_get_property(struct power_supply *psy,
++                enum power_supply_property psp,
++                union power_supply_propval *val)
++{
++
++    struct sc89890h *sc = power_supply_get_drvdata(psy);
++    u8 type = sc89890h_get_vbus_type(sc);
++
++    switch (psp) {
++    case POWER_SUPPLY_PROP_ONLINE:
++        if (type == SC89890H_VBUS_HVDCP || type == SC89890H_VBUS_UNKNOWN || type == SC89890H_VBUS_NONSTAND)
++            val->intval = 1;
++        else
++            val->intval = 0;
++        break;
++    case POWER_SUPPLY_PROP_CHARGE_TYPE:
++        val->intval = sc89890h_charge_status(sc);
++        break;
++    default:
++        return -EINVAL;
++    }
++
++    return 0;
++}
++
++static int sc89890h_psy_register(struct sc89890h *sc)
++{
++    sc->psy_cfg.drv_data = sc;
++	sc->psy_cfg.of_node = sc->dev->of_node;
++
++    sc->psy_desc.name = "sc89890h-usb";
++    sc->psy_desc.type = POWER_SUPPLY_TYPE_USB;
++    sc->psy_desc.properties = sc89890h_charger_props;
++    sc->psy_desc.num_properties = ARRAY_SIZE(sc89890h_charger_props);
++    sc->psy_desc.get_property = sc89890h_usb_get_property;
++    sc->psy_desc.external_power_changed = NULL;
++
++    sc->usb = devm_power_supply_register(sc->dev, 
++			&sc->psy_desc, &sc->psy_cfg);
++	if (IS_ERR(sc->usb)) {
++		dev_err(sc->dev, "failed to register usb\n");
++        power_supply_unregister(sc->usb);
++        return -ENODEV;
++	}
++
++    // sc->psy_desc.name = "sc89890h-Wall";
++    // sc->psy_desc.type = POWER_SUPPLY_TYPE_MAINS;
++    // sc->psy_desc.properties = sc89890h_charger_props;
++    // sc->psy_desc.num_properties = ARRAY_SIZE(sc89890h_charger_props);
++    // sc->psy_desc.get_property = sc89890h_wall_get_property;
++    // sc->psy_desc.external_power_changed = NULL;
++
++    // sc->wall = devm_power_supply_register(sc->dev, 
++	// 		&sc->psy_desc, &sc->psy_cfg);
++	// if (IS_ERR(sc->wall)) {
++	// 	dev_err(sc->dev, "failed to register wall\n");
++    //     power_supply_unregister(sc->wall);
++    //     return -ENODEV;
++	// }
++
++    return 0;
++}
++
++static void sc89890h_psy_unregister(struct sc89890h *sc)
++{
++    power_supply_unregister(sc->usb);
++    // power_supply_unregister(sc->wall);
++}
++
++static ssize_t sc89890h_show_registers(struct device *dev,
++                struct device_attribute *attr, char *buf)
++{
++    struct sc89890h *sc = dev_get_drvdata(dev);
++    u8 addr;
++    u8 val;
++    u8 tmpbuf[300];
++    int len;
++    int idx = 0;
++    int ret ;
++
++    idx = snprintf(buf, PAGE_SIZE, "%s:\n", "Charger");
++    for (addr = 0x0; addr <= 0x14; addr++) {
++        ret = sc89890h_read_byte(sc, &val, addr);
++        if (ret == 0) {
++            len = snprintf(tmpbuf, PAGE_SIZE - idx,"Reg[0x%.2x] = 0x%.2x\n", addr, val);
++            memcpy(&buf[idx], tmpbuf, len);
++            idx += len;
++        }
++    }
++
++    return idx;
++}
++
++static DEVICE_ATTR(registers, 0400, sc89890h_show_registers, NULL);
++
++static void sc89890h_create_device_node(struct device *dev)
++{
++	device_create_file(dev, &dev_attr_registers);
++}
++
++static int sc89890h_parse_dt(struct device *dev, struct sc89890h *sc)
++{
++    int ret, value;
++    struct device_node *np = dev->of_node;
++
++    ret = of_property_read_u32(np, 
++            "sc,sc89890h,vbus-volt-high-level", &sc->pe.high_volt_level);
++    // if (ret)
++    //     return ret;
++
++    ret = of_property_read_u32(np, 
++            "sc,sc89890h,vbus-volt-low-level", &sc->pe.low_volt_level);
++    // if (ret)
++    //     return ret;
++
++    ret = of_property_read_u32(np, 
++            "sc,sc89890h,vbat-min-volt-to-tuneup", &sc->pe.vbat_min_volt);
++    // if (ret)
++    //     return ret;
++
++    sc->cfg.enable_auto_dpdm = of_property_read_bool(np, 
++            "sc,sc89890h,enable-auto-dpdm");
++    sc->cfg.enable_term = of_property_read_bool(np, 
++            "sc,sc89890h,enable-termination");
++    sc->cfg.enable_ico = of_property_read_bool(np, 
++            "sc,sc89890h,enable-ico");
++    sc->cfg.use_absolute_vindpm = of_property_read_bool(np, 
++            "sc,sc89890h,use-absolute-vindpm");
++
++    ret = of_property_read_u32(np, 
++            "sc,sc89890h,charge-voltage",&sc->cfg.charge_voltage);
++    // if (ret)
++    //     return ret;
++
++    ret = of_property_read_u32(np, 
++            "sc,sc89890h,charge-current",&sc->cfg.charge_current);
++    // if (ret)
++    //     return ret;
++
++    ret = of_property_read_u32(np, 
++            "sc,sc89890h,term-current",&sc->cfg.term_current);
++    // if (ret)
++    //     return ret;
++
++    ret = of_property_read_u32(np, 
++            "sc,sc89890h,usb-ilim",&sc->cfg.input_limit_current);
++    // if (ret)
++    //     return ret;
++
++    return 0;
++}
++
++static int sc89890h_detect_device(struct sc89890h *sc)
++{
++    int ret;
++    u8 data;
++
++    ret = sc89890h_read_byte(sc, &data, SC89890H_REG_14);
++    if (ret == 0) {
++        sc->part_no = (data & SC89890H_PN_MASK) >> SC89890H_PN_SHIFT;
++    }
++
++    return ret;
++}
++
++static int sc89890h_read_batt_rsoc(struct sc89890h *sc)
++{
++    union power_supply_propval ret = {0,};
++
++    if (!sc->batt_psy) 
++        sc->batt_psy = power_supply_get_by_name("battery");
++
++    if (sc->batt_psy) {
++        power_supply_get_property(sc->batt_psy, POWER_SUPPLY_PROP_CAPACITY, &ret);
++        return ret.intval;
++    } else {
++        return 50;
++    }
++}
++
++static void sc89890h_adjust_absolute_vindpm(struct sc89890h *sc)
++{
++    u16 vbus_volt;
++    u16 vindpm_volt;
++    int ret;
++
++    ret = sc89890h_disable_charger(sc);	
++    if (ret < 0) {
++        dev_err(sc->dev,"%s:failed to disable charger\n",__func__);
++        /*return;*/
++    }
++    /* wait for new adc data */
++    msleep(1000);
++    vbus_volt = sc89890h_adc_read_vbus_volt(sc);
++    ret = sc89890h_enable_charger(sc);
++    if (ret < 0) {
++        dev_err(sc->dev, "%s:failed to enable charger\n",__func__);
++        return;
++    }
++
++    if (vbus_volt < 6000)
++        vindpm_volt = vbus_volt - 600;
++    else
++        vindpm_volt = vbus_volt - 1200;
++    ret = sc89890h_set_input_volt_limit(sc, vindpm_volt);
++    if (ret < 0)
++        dev_err(sc->dev, "%s:Set absolute vindpm threshold %d Failed:%d\n", 
++            __func__, vindpm_volt, ret);
++    else
++        dev_info(sc->dev, "%s:Set absolute vindpm threshold %d successfully\n", 
++            __func__, vindpm_volt);
++
++}
++
++static void sc89890h_adapter_in_workfunc(struct work_struct *work)
++{
++    struct sc89890h *sc = container_of(work, struct sc89890h, adapter_in_work);
++    int ret;
++
++    if (sc->vbus_type == SC89890H_VBUS_HVDCP) {
++        dev_info(sc->dev, "%s:HVDCP adapter plugged in\n", __func__);
++        //Vbus 9V
++        ret = sc89890h_set_vbus(sc, 9000);
++        ret = sc89890h_set_chargecurrent(sc, sc->cfg.charge_current);
++        if (ret < 0) 
++            dev_err(sc->dev, "%s:Failed to set charge current:%d\n", __func__, ret);
++        else
++            dev_info(sc->dev, "%s: Set charge current to %dmA successfully\n",
++                    __func__,sc->cfg.charge_current);
++        schedule_delayed_work(&sc->ico_work, 0);
++    } else if (sc->vbus_type == SC89890H_VBUS_USB_DCP) {/* DCP, let's check if it is PE adapter*/
++        dev_info(sc->dev, "%s:usb dcp adapter plugged in\n", __func__);
++        ret = sc89890h_set_chargecurrent(sc, sc->cfg.charge_current);
++        if (ret < 0) 
++            dev_err(sc->dev, "%s:Failed to set charge current:%d\n", __func__, ret);
++        else
++            dev_info(sc->dev, "%s: Set charge current to %dmA successfully\n",
++                    __func__,sc->cfg.charge_current);
++        schedule_delayed_work(&sc->check_pe_tuneup_work, 0);
++    } else if (sc->vbus_type == SC89890H_VBUS_USB_SDP 
++            || sc->vbus_type == SC89890H_VBUS_UNKNOWN) {
++        if (sc->vbus_type == SC89890H_VBUS_USB_SDP)
++            dev_info(sc->dev, "%s:host SDP plugged in\n", __func__);
++        else
++            dev_info(sc->dev, "%s:unknown adapter plugged in\n", __func__);
++
++        ret = sc89890h_set_chargecurrent(sc, 500);
++        if (ret < 0) 
++            dev_err(sc->dev, "%s:Failed to set charge current:%d\n", __func__, ret);
++        else
++            dev_info(sc->dev, "%s: Set charge current to %dmA successfully\n",
++                    __func__,500);
++    }
++    else {	
++        dev_info(sc->dev, "%s:other adapter plugged in,vbus_type is %d\n", 
++                __func__, sc->vbus_type);
++        ret = sc89890h_set_chargecurrent(sc, 1000);
++        if (ret < 0) 
++            dev_err(sc->dev, "%s:Failed to set charge current:%d\n", __func__, ret);
++        else
++            dev_info(sc->dev, "%s: Set charge current to %dmA successfully\n",
++                    __func__, 1000);
++        schedule_delayed_work(&sc->ico_work, 0);
++    }
++
++    if (sc->cfg.use_absolute_vindpm)
++        sc89890h_adjust_absolute_vindpm(sc);
++
++    schedule_delayed_work(&sc->monitor_work, 0);
++}
++
++static void sc89890h_adapter_out_workfunc(struct work_struct *work)
++{
++    struct sc89890h *sc = container_of(work, struct sc89890h, adapter_out_work);
++    int ret;
++
++    ret = sc89890h_set_input_volt_limit(sc, 4400);
++    if (ret < 0)
++        dev_err(sc->dev,"%s:reset vindpm threshold to 4400 failed:%d\n",__func__,ret);
++    else
++        dev_info(sc->dev,"%s:reset vindpm threshold to 4400 successfully\n",__func__);
++
++    cancel_delayed_work_sync(&sc->monitor_work);
++}
++
++static void sc89890h_ico_workfunc(struct work_struct *work)
++{
++    struct sc89890h *sc = container_of(work, struct sc89890h, ico_work.work);
++    int ret;
++    int idpm;
++    u8 status;
++    static bool ico_issued;
++
++    if (!ico_issued) {
++        ret = sc89890h_force_ico(sc);
++        if (ret < 0) {
++            schedule_delayed_work(&sc->ico_work, HZ); /* retry 1 second later*/
++            dev_info(sc->dev, "%s:ICO command issued failed:%d\n", __func__, ret);
++        } else {
++            ico_issued = true;
++            schedule_delayed_work(&sc->ico_work, 3 * HZ);
++            dev_info(sc->dev, "%s:ICO command issued successfully\n", __func__);
++        }
++    } else {
++        ico_issued = false;
++        ret = sc89890h_check_force_ico_done(sc);
++        if (ret) {/*ico done*/
++            ret = sc89890h_read_byte(sc, &status, SC89890H_REG_13);
++            if (ret == 0) {
++                idpm = (((status & SC89890H_IDPM_LIM_MASK) >> SC89890H_IDPM_LIM_SHIFT) 
++                    * SC89890H_IDPM_LIM_LSB) + SC89890H_IDPM_LIM_BASE;
++                dev_info(sc->dev, "%s:ICO done, result is:%d mA\n", __func__, idpm);
++            }
++        }
++    }
++}
++
++static void sc89890h_check_pe_tuneup_workfunc(struct work_struct *work)
++{
++    struct sc89890h *sc = container_of(work, struct sc89890h, check_pe_tuneup_work.work);
++
++    if (!sc->pe.enable) {
++        schedule_delayed_work(&sc->ico_work, 0);
++        return;
++    }
++
++    sc->vbat_volt = sc89890h_adc_read_battery_volt(sc);
++    sc->rsoc = sc89890h_read_batt_rsoc(sc); 
++
++    if (sc->vbat_volt > sc->pe.vbat_min_volt && sc->rsoc < 95) {
++        dev_info(sc->dev, "%s:trying to tune up vbus voltage\n", __func__);
++        sc->pe.target_volt = sc->pe.high_volt_level;
++        sc->pe.tune_up_volt = true;
++        sc->pe.tune_down_volt = false;
++        sc->pe.tune_done = false;
++        sc->pe.tune_count = 0;
++        sc->pe.tune_fail = false;
++        schedule_delayed_work(&sc->pe_volt_tune_work, 0);
++    } else if (sc->rsoc >= 95) {
++        schedule_delayed_work(&sc->ico_work, 0);
++    } else {
++        /* wait battery voltage up enough to check again */
++        schedule_delayed_work(&sc->check_pe_tuneup_work, 2*HZ);
++    }
++}
++
++static void sc89890h_tune_volt_workfunc(struct work_struct *work)
++{
++    struct sc89890h *sc = container_of(work, struct sc89890h, pe_volt_tune_work.work);
++    int ret = 0;
++    static bool pumpx_cmd_issued;
++
++    sc->vbus_volt = sc89890h_adc_read_vbus_volt(sc);
++
++    dev_info(sc->dev, "%s:vbus voltage:%d, Tune Target Volt:%d\n", 
++            __func__, sc->vbus_volt, sc->pe.target_volt);
++
++    if ((sc->pe.tune_up_volt && sc->vbus_volt > sc->pe.target_volt) ||
++        (sc->pe.tune_down_volt && sc->vbus_volt < sc->pe.target_volt)) {
++        dev_info(sc->dev, "%s:voltage tune successfully\n", __func__);
++        sc->pe.tune_done = true;
++        sc89890h_adjust_absolute_vindpm(sc);
++        if (sc->pe.tune_up_volt)
++            schedule_delayed_work(&sc->ico_work, 0);
++        return;
++    }
++
++    if (sc->pe.tune_count > 10) {
++        dev_info(sc->dev, "%s:voltage tune failed,reach max retry count\n", __func__);
++        sc->pe.tune_fail = true;
++        sc89890h_adjust_absolute_vindpm(sc);
++
++        if (sc->pe.tune_up_volt)
++            schedule_delayed_work(&sc->ico_work, 0);
++        return;
++    }
++
++    if (!pumpx_cmd_issued) {
++        if (sc->pe.tune_up_volt)
++            ret = sc89890h_pumpx_increase_volt(sc);
++        else if (sc->pe.tune_down_volt)
++            ret =  sc89890h_pumpx_decrease_volt(sc);
++        if (ret) {
++            schedule_delayed_work(&sc->pe_volt_tune_work, HZ);
++        } else {
++            dev_info(sc->dev, "%s:pumpx command issued.\n", __func__);
++            pumpx_cmd_issued = true;
++            sc->pe.tune_count++;
++            schedule_delayed_work(&sc->pe_volt_tune_work, 3*HZ);
++        }
++    } else {
++        if (sc->pe.tune_up_volt)
++            ret = sc89890h_pumpx_increase_volt_done(sc);
++        else if (sc->pe.tune_down_volt)
++            ret = sc89890h_pumpx_decrease_volt_done(sc);
++        if (ret == 0) {
++            dev_info(sc->dev, "%s:pumpx command finishedd!\n", __func__);
++            sc89890h_adjust_absolute_vindpm(sc);
++            pumpx_cmd_issued = 0;
++        }
++        schedule_delayed_work(&sc->pe_volt_tune_work, HZ);
++    }
++}
++
++
++static void sc89890h_monitor_workfunc(struct work_struct *work)
++{
++    struct sc89890h *sc = container_of(work, struct sc89890h, monitor_work.work);
++    u8 status = 0;
++    int ret;
++    int chg_current;
++
++    sc89890h_reset_watchdog_timer(sc);
++
++    sc->rsoc = sc89890h_read_batt_rsoc(sc);
++
++    sc->vbus_volt = sc89890h_adc_read_vbus_volt(sc);
++    sc->vbat_volt = sc89890h_adc_read_battery_volt(sc);
++    chg_current = sc89890h_adc_read_charge_current(sc);
++
++    // dev_info(sc->dev, "%s:vbus volt:%d,vbat volt:%d,charge current:%d\n", 
++    //         __func__,sc->vbus_volt,sc->vbat_volt,chg_current);
++
++    ret = sc89890h_read_byte(sc, &status, SC89890H_REG_13);
++    if (ret == 0 && (status & SC89890H_VDPM_STAT_MASK))
++        dev_info(sc->dev, "%s:VINDPM occurred\n", __func__);
++    if (ret == 0 && (status & SC89890H_IDPM_STAT_MASK))
++        dev_info(sc->dev, "%s:IINDPM occurred\n", __func__);
++        
++    if (sc->vbus_type == SC89890H_VBUS_USB_DCP && sc->vbus_volt > sc->pe.high_volt_level 
++            && sc->rsoc > 95 && !sc->pe.tune_down_volt) {
++        sc->pe.tune_down_volt = true;
++        sc->pe.tune_up_volt = false;
++        sc->pe.target_volt = sc->pe.low_volt_level;
++        sc->pe.tune_done = false;
++        sc->pe.tune_count = 0;
++        sc->pe.tune_fail = false;
++        schedule_delayed_work(&sc->pe_volt_tune_work, 0);
++    }
++
++    /* read temperature,or any other check if need to decrease charge current*/
++
++    schedule_delayed_work(&sc->monitor_work, 10 * HZ);
++}
++
++
++
++static void sc89890h_charger_irq_workfunc(struct work_struct *work)
++{
++    struct sc89890h *sc = container_of(work, struct sc89890h, irq_work);
++    u8 status = 0;
++    u8 fault = 0;
++    u8 charge_status = 0;
++    int ret;
++
++    msleep(100);
++
++    /* Read STATUS and FAULT registers */
++    ret = sc89890h_read_byte(sc, &status, SC89890H_REG_0B);
++    if (ret)
++        return;
++
++    ret = sc89890h_read_byte(sc, &fault, SC89890H_REG_0C);
++    if (ret)
++        return;
++    
++    sc->vbus_type = (status & SC89890H_VBUS_STAT_MASK) >> SC89890H_VBUS_STAT_SHIFT;
++
++    if (((sc->vbus_type == SC89890H_VBUS_NONE) || (sc->vbus_type == SC89890H_VBUS_OTG)) 
++            && (sc->status & SC89890H_STATUS_PLUGIN)) {
++        dev_info(sc->dev, "%s:adapter removed\n", __func__);
++        sc->status &= ~SC89890H_STATUS_PLUGIN;
++        schedule_work(&sc->adapter_out_work);
++    } else if (sc->vbus_type != SC89890H_VBUS_NONE && (sc->vbus_type != SC89890H_VBUS_OTG)
++            && !(sc->status & SC89890H_STATUS_PLUGIN)) {
++        dev_info(sc->dev, "%s:adapter plugged in\n", __func__);
++        sc->status |= SC89890H_STATUS_PLUGIN;
++        schedule_work(&sc->adapter_in_work);
++    }
++
++
++    if ((status & SC89890H_PG_STAT_MASK) && !(sc->status & SC89890H_STATUS_PG))
++        sc->status |= SC89890H_STATUS_PG;
++    else if (!(status & SC89890H_PG_STAT_MASK) && (sc->status & SC89890H_STATUS_PG))
++        sc->status &= ~SC89890H_STATUS_PG;
++
++    if (fault && !(sc->status & SC89890H_STATUS_FAULT))
++        sc->status |= SC89890H_STATUS_FAULT;
++    else if (!fault && (sc->status & SC89890H_STATUS_FAULT))
++        sc->status &= ~SC89890H_STATUS_FAULT;
++
++    charge_status = (status & SC89890H_CHRG_STAT_MASK) >> SC89890H_CHRG_STAT_SHIFT;
++    // if (charge_status == SC89890H_CHRG_STAT_IDLE)
++    //     dev_info(sc->dev, "%s:not charging\n", __func__);
++    // else if (charge_status == SC89890H_CHRG_STAT_PRECHG)
++    //     dev_info(sc->dev, "%s:precharging\n", __func__);
++    // else if (charge_status == SC89890H_CHRG_STAT_FASTCHG)
++    //     dev_info(sc->dev, "%s:fast charging\n", __func__);
++    // else if (charge_status == SC89890H_CHRG_STAT_CHGDONE)
++    //     dev_info(sc->dev, "%s:charge done!\n", __func__);
++    
++    // if (fault)
++    //     dev_info(sc->dev, "%s:charge fault:%02x\n", __func__,fault);
++}
++
++
++static irqreturn_t sc89890h_charger_interrupt(int irq, void *data)
++{
++    struct sc89890h *sc = data;
++
++    schedule_work(&sc->irq_work);
++    return IRQ_HANDLED;
++}
++
++static int sc89890h_charger_probe(struct i2c_client *client,
++            const struct i2c_device_id *id)
++{
++    struct sc89890h *sc;
++    struct device *dev = &client->dev;
++    struct gpio_desc *gpiod;
++    int ret = 0;
++
++    sc = devm_kzalloc(&client->dev, sizeof(struct sc89890h), GFP_KERNEL);
++    if (!sc) {
++        dev_err(&client->dev, "%s: out of memory\n", __func__);
++        return -ENOMEM;
++    }
++
++    sc->dev = &client->dev;
++    sc->client = client;
++
++    mutex_init(&sc->sc89890h_i2c_lock);
++
++    i2c_set_clientdata(client, sc);
++    sc89890h_create_device_node(&(client->dev));
++
++
++    ret = sc89890h_detect_device(sc);
++    if (!ret && sc->part_no == SC89890H) {
++        dev_info(sc->dev, "%s: charger device sc89890h detected\n",
++                 __func__);
++    } else {
++        dev_info(sc->dev, "%s: no sc89890h charger device found:%d\n", __func__, ret);
++        return -ENODEV;
++    }
++
++    sc->batt_psy = power_supply_get_by_name("battery");
++
++    if (client->dev.of_node)
++        sc89890h_parse_dt(&client->dev, sc);
++
++    ret = sc89890h_init_device(sc);
++    if (ret) {
++        dev_err(sc->dev, "device init failure: %d\n", ret);
++        goto err_0;
++    }
++
++    ret = sc89890h_psy_register(sc);
++    if (ret)
++        goto err_0;
++
++
++    INIT_WORK(&sc->irq_work, sc89890h_charger_irq_workfunc);
++    INIT_WORK(&sc->adapter_in_work, sc89890h_adapter_in_workfunc);
++    INIT_WORK(&sc->adapter_out_work, sc89890h_adapter_out_workfunc);
++    INIT_DELAYED_WORK(&sc->monitor_work, sc89890h_monitor_workfunc);
++    INIT_DELAYED_WORK(&sc->ico_work, sc89890h_ico_workfunc);
++    INIT_DELAYED_WORK(&sc->pe_volt_tune_work, sc89890h_tune_volt_workfunc);
++    INIT_DELAYED_WORK(&sc->check_pe_tuneup_work, sc89890h_check_pe_tuneup_workfunc);
++
++    gpiod = devm_gpiod_get_optional(dev, "irq", GPIOD_IN);
++	client->irq = gpiod_to_irq(gpiod);
++
++    if (client->irq) {
++		ret = devm_request_threaded_irq(&client->dev, client->irq,
++				NULL, sc89890h_charger_interrupt,
++				IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
++				"sc89890h_charger_irq", sc);
++		if (ret < 0) {
++			dev_err(sc->dev, "request irq for irq=%d failed, ret =%d\n",
++							client->irq, ret);
++			goto err_0;
++		}
++		enable_irq_wake(client->irq);
++	}
++
++    sc->pe.enable = false;
++    schedule_work(&sc->irq_work);/*in case of adapter has been in when power off*/
++    
++    dev_err(sc->dev, "sc89890h probe successfully, Part Num:%d\n!",
++				sc->part_no);
++    return ret;
++
++err_0:
++    cancel_work_sync(&sc->irq_work);
++    cancel_work_sync(&sc->adapter_in_work);
++    cancel_work_sync(&sc->adapter_out_work);
++    cancel_delayed_work_sync(&sc->monitor_work);
++    cancel_delayed_work_sync(&sc->ico_work);
++    cancel_delayed_work_sync(&sc->check_pe_tuneup_work);
++    cancel_delayed_work_sync(&sc->pe_volt_tune_work);
++
++    return ret;
++}
++
++static void sc89890h_charger_shutdown(struct i2c_client *client)
++{
++    struct sc89890h *sc = i2c_get_clientdata(client);
++
++    dev_info(sc->dev, "%s: shutdown\n", __func__);
++
++    sc89890h_psy_unregister(sc);
++
++    mutex_destroy(&sc->sc89890h_i2c_lock);
++
++    cancel_work_sync(&sc->irq_work);
++    cancel_work_sync(&sc->adapter_in_work);
++    cancel_work_sync(&sc->adapter_out_work);
++    cancel_delayed_work_sync(&sc->monitor_work);
++    cancel_delayed_work_sync(&sc->ico_work);
++    cancel_delayed_work_sync(&sc->check_pe_tuneup_work);
++    cancel_delayed_work_sync(&sc->pe_volt_tune_work);
++
++    // free_irq(sc->client->irq, NULL);
++}
++
++static struct of_device_id sc89890h_charger_match_table[] = {
++    {.compatible = "sc,sc89890h",},
++    {},
++};
++
++
++static const struct i2c_device_id sc89890h_charger_id[] = {
++    { "sc89890h", SC89890H },
++    {},
++};
++
++MODULE_DEVICE_TABLE(i2c, sc89890h_charger_id);
++
++static struct i2c_driver sc89890h_charger_driver = {
++    .driver		= {
++        .name	= "sc89890h",
++        .of_match_table = sc89890h_charger_match_table,
++    },
++    .id_table	= sc89890h_charger_id,
++
++    .probe		= sc89890h_charger_probe,
++    .shutdown   = sc89890h_charger_shutdown,
++};
++
++module_i2c_driver(sc89890h_charger_driver);
++
++MODULE_DESCRIPTION("SC SC89890H Charger Driver");
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("South Chip");
+diff --git a/drivers/power/supply/sc8989x_reg.h b/drivers/power/supply/sc8989x_reg.h
+new file mode 100755
+index 000000000000..1819b112ca50
+--- /dev/null
++++ b/drivers/power/supply/sc8989x_reg.h
+@@ -0,0 +1,378 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (c) 2022 Southchip Semiconductor Technology(Shanghai) Co., Ltd.
++ */
++#ifndef __SC89890H_HEADER__
++#define __SC89890H_HEADER__
++
++/* Register 00h */
++#define SC89890H_REG_00                 0x00
++#define SC89890H_ENHIZ_MASK             0x80
++#define SC89890H_ENHIZ_SHIFT            7
++#define SC89890H_HIZ_ENABLE             1
++#define SC89890H_HIZ_DISABLE            0
++#define SC89890H_ENILIM_MASK            0x40
++#define SC89890H_ENILIM_SHIFT           6
++#define SC89890H_ENILIM_ENABLE          1
++#define SC89890H_ENILIM_DISABLE         0
++
++#define SC89890H_IINLIM_MASK            0x3F
++#define SC89890H_IINLIM_SHIFT           0
++#define SC89890H_IINLIM_BASE            100
++#define SC89890H_IINLIM_LSB             50
++
++/* Register 01h */
++#define SC89890H_REG_01                 0x01
++#define SC89890H_DP_DRIVE_MASK          0xE0
++#define SC89890H_DP_DRIVE_SHIFT         5
++#define SC89890H_DM_DRIVE_MASK          0x1C
++#define SC89890H_DM_DRIVE_SHIFT         2
++
++#define SC89890H_HVDCP_5V               0x11
++#define SC89890H_HVDCP_9V               0x32
++#define SC89890H_HVDCP_12V              0x12
++
++#define SC89890H_VINDPMOS_MASK          0x03
++#define SC89890H_VINDPMOS_SHIFT         0
++#define SC89890H_VINDPMOS_400MV         0
++#define SC89890H_VINDPMOS_600MV         1
++
++/* Register 0x02 */
++#define SC89890H_REG_02                 0x02
++#define SC89890H_CONV_START_MASK        0x80
++#define SC89890H_CONV_START_SHIFT       7
++#define SC89890H_CONV_START             0
++#define SC89890H_CONV_RATE_MASK         0x40
++#define SC89890H_CONV_RATE_SHIFT        6
++#define SC89890H_ADC_CONTINUE_ENABLE    1
++#define SC89890H_ADC_CONTINUE_DISABLE   0
++
++#define SC89890H_BOOST_FREQ_MASK        0x20
++#define SC89890H_BOOST_FREQ_SHIFT       5
++#define SC89890H_BOOST_FREQ_1500K       0
++#define SC89890H_BOOST_FREQ_500K        0
++
++#define SC89890H_ICOEN_MASK             0x10
++#define SC89890H_ICOEN_SHIFT            4
++#define SC89890H_ICO_ENABLE             1
++#define SC89890H_ICO_DISABLE            0
++
++#define SC89890H_HVDCPEN_MASK           0x08
++#define SC89890H_HVDCPEN_SHIFT          3
++#define SC89890H_HVDCP_ENABLE           1
++#define SC89890H_HVDCP_DISABLE          0
++
++#define SC89890H_FORCE_DPDM_MASK        0x02
++#define SC89890H_FORCE_DPDM_SHIFT       1
++#define SC89890H_FORCE_DPDM             1
++
++#define SC89890H_AUTO_DPDM_EN_MASK      0x01
++#define SC89890H_AUTO_DPDM_EN_SHIFT     0
++#define SC89890H_AUTO_DPDM_ENABLE       1
++#define SC89890H_AUTO_DPDM_DISABLE      0
++
++/* Register 0x03 */
++#define SC89890H_REG_03                 0x03
++#define SC89890H_FORCE_DSEL_MASK        0x80
++#define SC89890H_FORCE_DSEL_SHIFT       7
++
++#define SC89890H_WDT_RESET_MASK         0x40
++#define SC89890H_WDT_RESET_SHIFT        6
++#define SC89890H_WDT_RESET              1
++
++#define SC89890H_OTG_CONFIG_MASK        0x20
++#define SC89890H_OTG_CONFIG_SHIFT       5
++#define SC89890H_OTG_ENABLE             1
++#define SC89890H_OTG_DISABLE            0
++
++#define SC89890H_CHG_CONFIG_MASK        0x10
++#define SC89890H_CHG_CONFIG_SHIFT       4
++#define SC89890H_CHG_ENABLE             1
++#define SC89890H_CHG_DISABLE            0
++
++#define SC89890H_SYS_MINV_MASK          0x0E
++#define SC89890H_SYS_MINV_SHIFT         1
++#define SC89890H_SYS_MINV_BASE          3000
++#define SC89890H_SYS_MINV_LSB           100
++
++#define SC89890H_VBAT_OTG_LOW_MASK      0x01
++#define SC89890H_VBAT_OTG_LOW_SHIFT     0
++#define SC89890H_VBAT_OTG_LOW_2V9       0
++#define SC89890H_VBAT_OTG_LOW_2V5       1
++
++/* Register 0x04*/
++#define SC89890H_REG_04                 0x04
++#define SC89890H_EN_PUMPX_MASK          0x80
++#define SC89890H_EN_PUMPX_SHIFT         7
++#define SC89890H_PUMPX_ENABLE           1
++#define SC89890H_PUMPX_DISABLE          0
++
++#define SC89890H_ICHG_MASK              0x7F
++#define SC89890H_ICHG_SHIFT             0
++#define SC89890H_ICHG_BASE              0
++#define SC89890H_ICHG_LSB               60
++
++/* Register 0x05*/
++#define SC89890H_REG_05                 0x05
++#define SC89890H_IPRECHG_MASK           0xF0
++#define SC89890H_IPRECHG_SHIFT          4
++#define SC89890H_IPRECHG_BASE           60
++#define SC89890H_IPRECHG_LSB            60
++
++#define SC89890H_ITERM_MASK             0x0F
++#define SC89890H_ITERM_SHIFT            0
++#define SC89890H_ITERM_BASE             30
++#define SC89890H_ITERM_LSB              60
++
++/* Register 0x06*/
++#define SC89890H_REG_06                 0x06
++#define SC89890H_VREG_MASK              0xFC
++#define SC89890H_VREG_SHIFT             2
++#define SC89890H_VREG_BASE              3840
++#define SC89890H_VREG_LSB               16
++
++#define SC89890H_BATLOWV_MASK           0x02
++#define SC89890H_BATLOWV_SHIFT          1
++#define SC89890H_BATLOWV_2800MV         0
++#define SC89890H_BATLOWV_3000MV         1
++
++#define SC89890H_VRECHG_MASK            0x01
++#define SC89890H_VRECHG_SHIFT           0
++#define SC89890H_VRECHG_100MV           0
++#define SC89890H_VRECHG_200MV           1
++
++/* Register 0x07*/
++#define SC89890H_REG_07                 0x07
++#define SC89890H_EN_TERM_MASK           0x80
++#define SC89890H_EN_TERM_SHIFT          7
++#define SC89890H_TERM_ENABLE            1
++#define SC89890H_TERM_DISABLE           0
++
++#define SC89890H_STAT_DIS_MASK          0x40
++#define SC89890H_STAT_DIS_SHIFT         6
++#define SC89890H_STAT_ENABLE            0
++#define SC89890H_STAT_DISABLE           1
++
++#define SC89890H_WDT_MASK               0x30
++#define SC89890H_WDT_SHIFT              4
++#define SC89890H_WDT_DISABLE            0
++#define SC89890H_WDT_40S                1
++#define SC89890H_WDT_80S                2
++#define SC89890H_WDT_160S               3
++#define SC89890H_WDT_BASE               0
++#define SC89890H_WDT_LSB                40
++
++#define SC89890H_EN_TIMER_MASK          0x08
++#define SC89890H_EN_TIMER_SHIFT         3
++#define SC89890H_CHG_TIMER_ENABLE       1
++#define SC89890H_CHG_TIMER_DISABLE      0
++
++#define SC89890H_CHG_TIMER_MASK         0x06
++#define SC89890H_CHG_TIMER_SHIFT        1
++#define SC89890H_CHG_TIMER_5HOURS       0
++#define SC89890H_CHG_TIMER_8HOURS       1
++#define SC89890H_CHG_TIMER_12HOURS      2
++#define SC89890H_CHG_TIMER_20HOURS      3
++
++#define SC89890H_JEITA_ISET_MASK        0x01
++#define SC89890H_JEITA_ISET_SHIFT       0
++#define SC89890H_JEITA_ISET_50PCT       0
++#define SC89890H_JEITA_ISET_20PCT       1
++
++/* Register 0x08*/
++#define SC89890H_REG_08                 0x08
++#define SC89890H_BAT_COMP_MASK          0xE0
++#define SC89890H_BAT_COMP_SHIFT         5
++#define SC89890H_BAT_COMP_BASE          0
++#define SC89890H_BAT_COMP_LSB           20
++
++#define SC89890H_VCLAMP_MASK            0x1C
++#define SC89890H_VCLAMP_SHIFT           2 
++#define SC89890H_VCLAMP_BASE            0
++#define SC89890H_VCLAMP_LSB             32
++
++#define SC89890H_TREG_MASK              0x03
++#define SC89890H_TREG_SHIFT             0
++#define SC89890H_TREG_60C               0
++#define SC89890H_TREG_80C               1
++#define SC89890H_TREG_100C              2
++#define SC89890H_TREG_120C              3
++
++/* Register 0x09*/
++#define SC89890H_REG_09                 0x09
++#define SC89890H_FORCE_ICO_MASK         0x80
++#define SC89890H_FORCE_ICO_SHIFT        7
++#define SC89890H_FORCE_ICO              1
++
++#define SC89890H_TMR2X_EN_MASK          0x40
++#define SC89890H_TMR2X_EN_SHIFT         6
++
++#define SC89890H_BATFET_DIS_MASK        0x20
++#define SC89890H_BATFET_DIS_SHIFT       5
++#define SC89890H_BATFET_OFF             1
++
++#define SC89890H_JEITA_VSET_MASK        0x10
++#define SC89890H_JEITA_VSET_SHIFT       4
++#define SC89890H_JEITA_VSET_N150MV      0
++#define SC89890H_JEITA_VSET_VREG        1
++
++#define SC89890H_BATFET_DLY_MASK        0x08
++#define SC89890H_BATFET_DLY_SHIFT       3
++
++#define SC89890H_BATFET_RST_EN_MASK     0x04
++#define SC89890H_BATFET_RST_EN_SHIFT    2
++
++#define SC89890H_PUMPX_UP_MASK          0x02
++#define SC89890H_PUMPX_UP_SHIFT         1
++#define SC89890H_PUMPX_UP               1
++
++#define SC89890H_PUMPX_DOWN_MASK        0x01
++#define SC89890H_PUMPX_DOWN_SHIFT       0
++#define SC89890H_PUMPX_DOWN             1
++
++/* Register 0x0A*/
++#define SC89890H_REG_0A                 0x0A
++#define SC89890H_BOOSTV_MASK            0xF0
++#define SC89890H_BOOSTV_SHIFT           4
++#define SC89890H_BOOSTV_BASE            3900
++#define SC89890H_BOOSTV_LSB             100
++
++#define SC89890H_PFM_OTG_DIS_MASK       0x08
++#define SC89890H_PFM_OTG_DIS_SHIFT      3
++
++#define SC89890H_BOOST_LIM_MASK         0x07
++#define SC89890H_BOOST_LIM_SHIFT        0
++#define SC89890H_BOOST_LIM_500MA        0x00
++#define SC89890H_BOOST_LIM_750MA        0x01
++#define SC89890H_BOOST_LIM_1200MA       0x02
++#define SC89890H_BOOST_LIM_1400MA       0x03
++#define SC89890H_BOOST_LIM_1650MA       0x04
++#define SC89890H_BOOST_LIM_1875MA       0x05
++#define SC89890H_BOOST_LIM_2150MA       0x06
++#define SC89890H_BOOST_LIM_2450MA       0x07
++
++/* Register 0x0B*/
++#define SC89890H_REG_0B                 0x0B
++#define SC89890H_VBUS_STAT_MASK         0xE0           
++#define SC89890H_VBUS_STAT_SHIFT        5
++
++#define SC89890H_CHRG_STAT_MASK         0x18
++#define SC89890H_CHRG_STAT_SHIFT        3
++#define SC89890H_CHRG_STAT_IDLE         0
++#define SC89890H_CHRG_STAT_PRECHG       1
++#define SC89890H_CHRG_STAT_FASTCHG      2
++#define SC89890H_CHRG_STAT_CHGDONE      3
++
++#define SC89890H_PG_STAT_MASK           0x04
++#define SC89890H_PG_STAT_SHIFT          2
++
++#define SC89890H_SDP_STAT_MASK          0x02
++#define SC89890H_SDP_STAT_SHIFT         1
++
++#define SC89890H_VSYS_STAT_MASK         0x01
++#define SC89890H_VSYS_STAT_SHIFT        0
++
++/* Register 0x0C*/
++#define SC89890H_REG_0C                 0x0c
++#define SC89890H_FAULT_WDT_MASK         0x80
++#define SC89890H_FAULT_WDT_SHIFT        7
++
++#define SC89890H_FAULT_BOOST_MASK       0x40
++#define SC89890H_FAULT_BOOST_SHIFT      6
++
++#define SC89890H_FAULT_CHRG_MASK        0x30
++#define SC89890H_FAULT_CHRG_SHIFT       4
++#define SC89890H_FAULT_CHRG_NORMAL      0
++#define SC89890H_FAULT_CHRG_INPUT       1
++#define SC89890H_FAULT_CHRG_THERMAL     2
++#define SC89890H_FAULT_CHRG_TIMER       3
++
++#define SC89890H_FAULT_BAT_MASK         0x08
++#define SC89890H_FAULT_BAT_SHIFT        3
++
++#define SC89890H_FAULT_NTC_MASK         0x07
++#define SC89890H_FAULT_NTC_SHIFT        0
++#define SC89890H_FAULT_NTC_NORMAL       0
++#define SC89890H_FAULT_NTC_WARM         2
++#define SC89890H_FAULT_NTC_COOL         3
++#define SC89890H_FAULT_NTC_COLD         5
++#define SC89890H_FAULT_NTC_HOT          6
++
++/* Register 0x0D*/
++#define SC89890H_REG_0D                 0x0D
++#define SC89890H_FORCE_VINDPM_MASK      0x80        
++#define SC89890H_FORCE_VINDPM_SHIFT     7
++#define SC89890H_FORCE_VINDPM_ENABLE    1
++#define SC89890H_FORCE_VINDPM_DISABLE   0
++
++#define SC89890H_VINDPM_MASK            0x7F
++#define SC89890H_VINDPM_SHIFT           0
++#define SC89890H_VINDPM_BASE            2600
++#define SC89890H_VINDPM_LSB             100
++
++/* Register 0x0E*/
++#define SC89890H_REG_0E                 0x0E
++#define SC89890H_THERM_STAT_MASK        0x80
++#define SC89890H_THERM_STAT_SHIFT       7
++
++#define SC89890H_BATV_MASK              0x7F
++#define SC89890H_BATV_SHIFT             0
++#define SC89890H_BATV_BASE              2304
++#define SC89890H_BATV_LSB               20
++
++/* Register 0x0F*/
++#define SC89890H_REG_0F                 0x0F
++#define SC89890H_SYSV_MASK              0x7F
++#define SC89890H_SYSV_SHIFT             0
++#define SC89890H_SYSV_BASE              2304
++#define SC89890H_SYSV_LSB               20
++
++/* Register 0x10*/
++#define SC89890H_REG_10                 0x10
++#define SC89890H_TSPCT_MASK             0x7F
++#define SC89890H_TSPCT_SHIFT            0
++#define SC89890H_TSPCT_BASE             21
++#define SC89890H_TSPCT_LSB              (47 / 100)
++
++/* Register 0x11*/
++#define SC89890H_REG_11                 0x11
++#define SC89890H_VBUS_GD_MASK           0x80
++#define SC89890H_VBUS_GD_SHIFT          7
++
++#define SC89890H_VBUSV_MASK             0x7F
++#define SC89890H_VBUSV_SHIFT            0
++#define SC89890H_VBUSV_BASE             2600
++#define SC89890H_VBUSV_LSB              100
++
++/* Register 0x12*/
++#define SC89890H_REG_12                 0x12
++#define SC89890H_ICHGR_MASK             0x7F
++#define SC89890H_ICHGR_SHIFT            0
++#define SC89890H_ICHGR_BASE             0
++#define SC89890H_ICHGR_LSB              50
++
++/* Register 0x13*/
++#define SC89890H_REG_13                 0x13
++#define SC89890H_VDPM_STAT_MASK         0x80
++#define SC89890H_VDPM_STAT_SHIFT        7
++
++#define SC89890H_IDPM_STAT_MASK         0x40
++#define SC89890H_IDPM_STAT_SHIFT        6
++
++#define SC89890H_IDPM_LIM_MASK          0x3F
++#define SC89890H_IDPM_LIM_SHIFT         0
++#define SC89890H_IDPM_LIM_BASE          100
++#define SC89890H_IDPM_LIM_LSB           50
++
++/* Register 0x14*/
++#define SC89890H_REG_14                 0x14
++#define SC89890H_RESET_MASK             0x80             
++#define SC89890H_RESET_SHIFT            7
++#define SC89890H_RESET                  1
++
++#define SC89890H_ICO_OPTIMIZED_MASK     0x40
++#define SC89890H_ICO_OPTIMIZED_SHIFT    6
++#define SC89890H_PN_MASK                0x38
++#define SC89890H_PN_SHIFT               3
++
++#endif
