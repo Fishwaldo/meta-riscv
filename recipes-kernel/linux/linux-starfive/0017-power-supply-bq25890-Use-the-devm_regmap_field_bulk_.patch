@@ -1,0 +1,48 @@
+From 1d728eb11a9a4413da90b7e03e896f1770d7242a Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Tue, 1 Feb 2022 14:06:59 +0100
+Subject: [PATCH] power: supply: bq25890: Use the
+ devm_regmap_field_bulk_alloc() helper
+
+Use the devm_regmap_field_bulk_alloc() helper function instead of
+open-coding this ourselves.
+
+Reviewed-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>
+---
+ drivers/power/supply/bq25890_charger.c | 14 ++++----------
+ 1 file changed, 4 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/power/supply/bq25890_charger.c b/drivers/power/supply/bq25890_charger.c
+index 179abed92f9b..852a6fec4339 100644
+--- a/drivers/power/supply/bq25890_charger.c
++++ b/drivers/power/supply/bq25890_charger.c
+@@ -1165,7 +1165,6 @@ static int bq25890_probe(struct i2c_client *client,
+ 	struct device *dev = &client->dev;
+ 	struct bq25890_device *bq;
+ 	int ret;
+-	int i;
+ 
+ 	bq = devm_kzalloc(dev, sizeof(*bq), GFP_KERNEL);
+ 	if (!bq)
+@@ -1182,15 +1181,10 @@ static int bq25890_probe(struct i2c_client *client,
+ 		return dev_err_probe(dev, PTR_ERR(bq->rmap),
+ 				     "failed to allocate register map\n");
+ 
+-	for (i = 0; i < ARRAY_SIZE(bq25890_reg_fields); i++) {
+-		const struct reg_field *reg_fields = bq25890_reg_fields;
+-
+-		bq->rmap_fields[i] = devm_regmap_field_alloc(dev, bq->rmap,
+-							     reg_fields[i]);
+-		if (IS_ERR(bq->rmap_fields[i]))
+-			return dev_err_probe(dev, PTR_ERR(bq->rmap_fields[i]),
+-					     "cannot allocate regmap field\n");
+-	}
++	ret = devm_regmap_field_bulk_alloc(dev, bq->rmap, bq->rmap_fields,
++					   bq25890_reg_fields, F_MAX_FIELDS);
++	if (ret)
++		return ret;
+ 
+ 	i2c_set_clientdata(client, bq);
+ 

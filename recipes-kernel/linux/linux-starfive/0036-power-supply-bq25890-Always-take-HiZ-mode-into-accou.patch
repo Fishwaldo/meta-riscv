@@ -1,0 +1,40 @@
+From cb24d6b11876a317bb7c52f6bc6644f8764ae755 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Mon, 28 Nov 2022 10:28:53 +0100
+Subject: [PATCH] power: supply: bq25890: Always take HiZ mode into account for
+ ADC rate
+
+The code to check if F_CONV_RATE has been set, or if a manual ADC
+conversion needs to be triggered, as well as the code to set
+the initial F_CONV_RATE value at probe both where not taking
+HiZ mode into account. Add checks for this.
+
+Reviewed-by: Marek Vasut <marex@denx.de>
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>
+---
+ drivers/power/supply/bq25890_charger.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/power/supply/bq25890_charger.c b/drivers/power/supply/bq25890_charger.c
+index a7115f04871d..29302b08ab13 100644
+--- a/drivers/power/supply/bq25890_charger.c
++++ b/drivers/power/supply/bq25890_charger.c
+@@ -467,7 +467,7 @@ static void bq25890_update_state(struct bq25890_device *bq,
+ 	/* update state in case we lost an interrupt */
+ 	__bq25890_handle_irq(bq);
+ 	*state = bq->state;
+-	do_adc_conv = !state->online && bq25890_is_adc_property(psp);
++	do_adc_conv = (!state->online || state->hiz) && bq25890_is_adc_property(psp);
+ 	if (do_adc_conv)
+ 		bq25890_field_write(bq, F_CONV_START, 1);
+ 	mutex_unlock(&bq->lock);
+@@ -956,7 +956,7 @@ static int bq25890_hw_init(struct bq25890_device *bq)
+ 	}
+ 
+ 	/* Configure ADC for continuous conversions when charging */
+-	ret = bq25890_field_write(bq, F_CONV_RATE, !!bq->state.online);
++	ret = bq25890_field_write(bq, F_CONV_RATE, bq->state.online && !bq->state.hiz);
+ 	if (ret < 0) {
+ 		dev_dbg(bq->dev, "Config ADC failed %d\n", ret);
+ 		return ret;

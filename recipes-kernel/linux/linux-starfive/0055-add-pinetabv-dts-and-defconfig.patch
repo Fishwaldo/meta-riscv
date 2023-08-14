@@ -1,4 +1,4 @@
-From 962a9b3589d2a0f665367aafc8be6a33e8f25b0b Mon Sep 17 00:00:00 2001
+From 79604a1b0544a3e94504ab9c0335388710d8be4a Mon Sep 17 00:00:00 2001
 From: Justin Hammond <justin@dynam.ac>
 Date: Mon, 7 Aug 2023 05:37:13 +0000
 Subject: [PATCH] add pinetabv dts and defconfig
@@ -7,9 +7,9 @@ Subject: [PATCH] add pinetabv dts and defconfig
  arch/riscv/boot/dts/starfive/Makefile         |   3 +-
  arch/riscv/boot/dts/starfive/jh7110-clk.dtsi  |   6 +
  .../dts/starfive/jh7110-pine64-pinetabv.dts   | 259 +++++
- .../dts/starfive/jh7110-pine64-pinetabv.dtsi  | 956 ++++++++++++++++++
+ .../dts/starfive/jh7110-pine64-pinetabv.dtsi  | 999 ++++++++++++++++++
  arch/riscv/boot/dts/starfive/jh7110.dtsi      |   7 +
- 5 files changed, 1991 insertions(+), 1 deletion(-)
+ 5 files changed, 1273 insertions(+), 1 deletion(-)
  create mode 100644 arch/riscv/boot/dts/starfive/jh7110-pine64-pinetabv.dts
  create mode 100755 arch/riscv/boot/dts/starfive/jh7110-pine64-pinetabv.dtsi
 
@@ -308,10 +308,10 @@ index 000000000000..c96966311a97
 +};
 diff --git a/arch/riscv/boot/dts/starfive/jh7110-pine64-pinetabv.dtsi b/arch/riscv/boot/dts/starfive/jh7110-pine64-pinetabv.dtsi
 new file mode 100755
-index 000000000000..7c1a43e462dc
+index 000000000000..b2ce2cda0b28
 --- /dev/null
 +++ b/arch/riscv/boot/dts/starfive/jh7110-pine64-pinetabv.dtsi
-@@ -0,0 +1,956 @@
+@@ -0,0 +1,999 @@
 +// SPDX-License-Identifier: GPL-2.0 OR MIT
 +/*
 + * Copyright (C) 2022 StarFive Technology Co., Ltd.
@@ -330,6 +330,7 @@ index 000000000000..7c1a43e462dc
 +/ {
 +	model = "Pine64 PineTabV";
 +	compatible = "pine64,pinetabv", "starfive,jh7110";
++	chassis-type = "tablet";
 +
 +	aliases {
 +		spi0 = &qspi;
@@ -396,7 +397,7 @@ index 000000000000..7c1a43e462dc
 +    vcc5v: vcc5v{
 +        compatible = "regulator-fixed";
 +        enable-active-high;
-+        gpio = <&gpio 39 0>;
++        gpio = <&gpio PAD_GPIO39 GPIO_ACTIVE_LOW>;
 +        regulator-boot-on;
 +        regulator-always-on;
 +        regulator-name = "vcc_5v";
@@ -415,20 +416,20 @@ index 000000000000..7c1a43e462dc
 +        regulator-max-microvolt = <3300000>;
 +    };
 +
++	rfkill_wifi {
++		compatible = "rfkill-gpio";
++		label = "WiFi";
++		radio-type = "wlan";
++		shutdown-gpios = <&gpio PAD_GPIO42 GPIO_ACTIVE_HIGH>;
++	};
++
 +	rfkill_bt {
 +		compatible = "rfkill-gpio";
 +		label = "BlueTooth";
 +		radio-type = "bluetooth";
-+		shutdown-gpios = <&gpioa 54 GPIO_ACTIVE_HIGH>;
++		shutdown-gpios = <&gpio PAD_GPIO54 GPIO_ACTIVE_HIGH>;
 +	};
 +
-+	rfkill_wifi {
-+		compatible = "rfkill-gpio";
-+		label = "Wi-Fi";
-+		radio-type = "wifi";
-+		shutdown-gpios = <&gpioa 42 GPIO_ACTIVE_HIGH>;
-+		//reset-gpios = <&gpio 47 GPIO_ACTIVE_HIGH>;
-+	};
 +
 +    gpio_keys: gpio-keys {
 +        status = "okay";
@@ -454,8 +455,8 @@ index 000000000000..7c1a43e462dc
 +        hall-key {
 +            label = "Keyboard Cover Closed";
 +            debounce-interval = <10>;
-+            linux,input-type = <EV_KEY>;
-+            linux,code = <KEY_SLEEP>;
++            linux,input-type = <EV_SW>;
++            linux,code = <SW_LID>;
 +            gpios = <&gpio 40 GPIO_ACTIVE_LOW>;
 +        };
 +
@@ -466,34 +467,55 @@ index 000000000000..7c1a43e462dc
 +			linux,code = <KEY_POWER>;
 +			gpios = <&gpio 59 GPIO_ACTIVE_HIGH>;
 +		};
++
 +    };
 +
-+    bat: battery {
-+        compatible = "simple-battery";
-+        charge-full-design-microamp-hours = <9800000>;
-+        voltage-max-design-microvolt = <4350000>;
-+        voltage-min-design-microvolt = <3000000>;
-+    };
++	battery: battery {
++		compatible = "simple-battery";
++		charge-full-design-microamp-hours = <6000000>;
++		charge-term-current-microamp = <300000>;
++		constant-charge-current-max-microamp = <2000000>;
++		constant-charge-voltage-max-microvolt = <4350000>;
++		voltage-max-design-microvolt = <4350000>;
++		voltage-min-design-microvolt = <3400000>;
++
++		ocv-capacity-celsius = <20>;
++		ocv-capacity-table-0 = <4322000 100>, <4250000 95>, <4192000 90>, <4136000 85>,
++				       <4080000 80>, <4022000 75>, <3972000 70>, <3928000 65>,
++				       <3885000 60>, <3833000 55>, <3798000 50>, <3780000 45>,
++				       <3776000 40>, <3773000 35>, <3755000 30>, <3706000 25>,
++				       <3640000 20>, <3589000 15>, <3535000 10>, <3492000 5>,
++				       <3400000 0>;
++	};
 +
 +	leds {
 +		compatible = "gpio-leds";
-+
 +		led-flash {
-+			gpios = <&gpioa 55 GPIO_ACTIVE_HIGH>;
++			gpios = <&gpio PAD_GPIO55 GPIO_ACTIVE_HIGH>;
 +			color = <LED_COLOR_ID_WHITE>;
 +			function = LED_FUNCTION_FLASH;
 +			linux,default-trigger = "flash";
 +			label = "Camera Flash";
++			power-supply = <&vcc5v>;
 +		};
 +	};
 +
 +	backlight: backlight {
 +		compatible = "pwm-backlight";
 +		pwms = <&ptc 0 500000 0>;
++		//enable-gpios = <&gpio PAD_GPIO45 GPIO_ACTIVE_HIGH>;
 +		brightness-levels = <0 1023>;
 +		num-interpolated-steps = <1023>;
 +		default-brightness-level = <576>;
 +		status = "okay";
++		power-supply = <&vcc5v>;
++	};
++
++	speaker_amp: speaker-amplifier {
++		compatible = "simple-audio-amplifier";
++		enable-gpios = <&gpio PAD_GPIO50 GPIO_ACTIVE_HIGH>;
++		sound-name-prefix = "Speaker Amplifier";
++		//VCC-supply = <&pa_5v>;
 +	};
 +
 +};
@@ -635,7 +657,8 @@ index 000000000000..7c1a43e462dc
 +			starfive,pin-gpio-doen = <OEN_LOW>;
 +		};
 +	};
-+	
++
++
 +	rfkill_wifi_pins: rfkill_wifi_pins {
 +		rfkill_wifi_disn {
 +			starfive,pins = <PAD_GPIO42>;
@@ -702,7 +725,7 @@ index 000000000000..7c1a43e462dc
 +		pwm_ch0-pins {
 +			starfive,pins = <PAD_GPIO45>;
 +			starfive,pinmux = <PAD_GPIO45_FUNC_SEL 0>;
-+			starfive,pin-ioconfig = <IO(GPIO_IE(1))>;
++			starfive,pin-ioconfig = <IO(GPIO_IE(1) | (GPIO_PD(1)))>;
 +			starfive,pin-gpio-dout = <GPO_PTC0_PWM_0>;
 +			starfive,pin-gpio-doen = <OEN_PTC0_PWM_0_OE_N>;
 +		};
@@ -732,6 +755,26 @@ index 000000000000..7c1a43e462dc
 +
 +&sound7 {
 +	/* i2s + es8316 */
++	simple-audio-card,name = "Pine64,PineTabV";
++	
++	simple-audio-card,widgets =
++		"Microphone", "Mic Jack",
++		"Headphone", "Headphones",
++		"Speaker", "Speaker";
++
++	simple-audio-card,routing =
++		"MIC1", "Mic Jack",
++		"Headphones", "HPOL",
++		"Headphones", "HPOR",
++		"Speaker Amplifier INL", "HPOL",
++		"Speaker Amplifier INR", "HPOR",
++		"Speaker", "Speaker Amplifier OUTL",
++		"Speaker", "Speaker Amplifier OUTR";
++
++	simple-audio-card,hp-det-gpio = <&gpio 36 0>;
++	simple-audio-card,aux-devs = <&speaker_amp>;
++	simple-audio-card,pin-switches = "Speaker";
++
 +	simple-audio-card,dai-link@0 {
 +		reg = <0>;
 +		format = "i2s";
@@ -752,9 +795,8 @@ index 000000000000..7c1a43e462dc
 +			sound-dai = <&es8316>;
 +		};
 +	};
++
 +};
-+
-+
 +
 +&i2c0 {
 +	clock-frequency = <100000>;
@@ -898,7 +940,25 @@ index 000000000000..7c1a43e462dc
 +		pagesize = <16>;
 +	};
 +
-+    cw2015@62 {
++	charger: sc89890@6a {
++		compatible = "sc,sc89890";
++		status = "okay";
++		reg = <0x6a>;
++		interrupt-parent = <&gpio>;
++		interrupts = <48 IRQ_TYPE_EDGE_FALLING>;
++		ti,battery-regulation-voltage = <4350000>; /* maximum charging voltage (in uV) */
++		ti,charge-current = <2000000> /* maximum charging current (in uA) */;
++		ti,termination-current = <300000>;  /* charge will be terminated when current in constant-voltage phase drops below this value (in uA) */
++		ti,precharge-current = <128000>; /* maximum charge current during precharge phase (in uA) */
++		ti,minimum-sys-voltage = <3400000>; /* when battery is charging and it is below minimum system voltage, the system will be regulated above minimum-sys-voltage setting (in uV) */
++		ti,boost-voltage = <5000000>; /* VBUS voltage level in boost mode (in uV) */
++		ti,boost-max-current = <1500000>; /* maximum allowed current draw in boost mode (in uA) */
++		ti,use-ilim-pin = <0>; /* dont use ILIM pin to set charge current */
++		ti,input-current-limit = <2000000>; /* maximum input current limit (in uA) as PtV can't detect what type of Charger is connected */
++		monitored-battery = <&battery>;
++	};
++
++    fuelguage: cw2015@62 {
 +        status = "okay";
 +        compatible = "cellwise,cw2015";
 +        reg = <0x62>;
@@ -912,26 +972,9 @@ index 000000000000..7c1a43e462dc
 +			0x2E 0x56 0xA3 0xCA 0x80 0x6A 0x99 0xCB
 +			0x2F 0x00 0x64 0xA5 0xB5 0x11 0xF0 0x31>;
 +		cellwise,monitor-interval-ms = <5000>;
-+		monitored-battery = <&bat>;
-+        power-supplies = <&sc89890h>;
++		monitored-battery = <&battery>;
++        power-supplies = <&charger>;
 +    };  
-+
-+    sc89890h: sc89890@6a{
-+		compatible = "sc,sc89890h";
-+		reg = <0x6A>;
-+		irq-gpios = <&gpio 48 GPIO_ACTIVE_LOW>;
-+		charger_name = "primary_chg";
-+		eint_name = "chr_stat";
-+		sc,sc89890h,usb-vlim = <4500>;
-+		sc,sc89890h,usb-ilim = <2000>;
-+		sc,sc89890h,usb-vreg = <4200>;
-+		sc,sc89890h,usb-ichg = <2000>;
-+		sc,sc89890h,precharge-current = <180>;
-+		sc,sc89890h,termination-current = <180>;
-+		sc,sc89890h,boost-voltage = <5000>;
-+		sc,sc89890h,boost-current = <1200>;
-+		sc,sc89890h,charge-current = <1500>;
-+	};
 +
 +};
 +

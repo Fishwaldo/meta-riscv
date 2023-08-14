@@ -1,0 +1,26 @@
+From 10046fe5dbd8af55168e77ddededf0ae91b41371 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Sun, 31 Jul 2022 12:02:28 +0200
+Subject: [PATCH] power: supply: bq25890: Disable PUMPX_EN on errors
+
+When bq25890_pump_express_work encounters an errors disable
+the PUMPX_EN flag, just like the work does on a successful exit.
+
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>
+---
+ drivers/power/supply/bq25890_charger.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/power/supply/bq25890_charger.c b/drivers/power/supply/bq25890_charger.c
+index 852a6fec4339..056260b2cb76 100644
+--- a/drivers/power/supply/bq25890_charger.c
++++ b/drivers/power/supply/bq25890_charger.c
+@@ -946,6 +946,7 @@ static void bq25890_pump_express_work(struct work_struct *data)
+ 
+ 	return;
+ error_print:
++	bq25890_field_write(bq, F_PUMPX_EN, 0);
+ 	dev_err(bq->dev, "Failed to request hi-voltage charging\n");
+ }
+ 

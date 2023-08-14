@@ -1,4 +1,4 @@
-From 505798139c074093523ae30a065772b547d6ec97 Mon Sep 17 00:00:00 2001
+From 11e643dc4ffca8c692421f406c258b14071ec374 Mon Sep 17 00:00:00 2001
 From: Justin Hammond <justin@dynam.ac>
 Date: Wed, 2 Aug 2023 06:39:29 +0000
 Subject: [PATCH] Add/update gc02m2 and ov5640 camera support and v4l2 platform

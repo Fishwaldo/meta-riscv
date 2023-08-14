@@ -1,0 +1,42 @@
+From f361d34e7a985d8c3a5192d6ab211a8e6b656858 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Sat, 30 Oct 2021 20:28:04 +0200
+Subject: [PATCH] power: supply: bq25890: Fix initial setting of the
+ F_CONV_RATE field
+
+The code doing the initial setting of the F_CONV_RATE field based
+on the bq->state.online flag. In order for this to work properly,
+this must be done after the initial bq25890_get_chip_state() call.
+
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>
+---
+ drivers/power/supply/bq25890_charger.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/power/supply/bq25890_charger.c b/drivers/power/supply/bq25890_charger.c
+index 838ae3618af5..b7eac5428083 100644
+--- a/drivers/power/supply/bq25890_charger.c
++++ b/drivers/power/supply/bq25890_charger.c
+@@ -682,16 +682,16 @@ static int bq25890_hw_init(struct bq25890_device *bq)
+ 		}
+ 	}
+ 
+-	/* Configure ADC for continuous conversions when charging */
+-	ret = bq25890_field_write(bq, F_CONV_RATE, !!bq->state.online);
++	ret = bq25890_get_chip_state(bq, &bq->state);
+ 	if (ret < 0) {
+-		dev_dbg(bq->dev, "Config ADC failed %d\n", ret);
++		dev_dbg(bq->dev, "Get state failed %d\n", ret);
+ 		return ret;
+ 	}
+ 
+-	ret = bq25890_get_chip_state(bq, &bq->state);
++	/* Configure ADC for continuous conversions when charging */
++	ret = bq25890_field_write(bq, F_CONV_RATE, !!bq->state.online);
+ 	if (ret < 0) {
+-		dev_dbg(bq->dev, "Get state failed %d\n", ret);
++		dev_dbg(bq->dev, "Config ADC failed %d\n", ret);
+ 		return ret;
+ 	}
+ 

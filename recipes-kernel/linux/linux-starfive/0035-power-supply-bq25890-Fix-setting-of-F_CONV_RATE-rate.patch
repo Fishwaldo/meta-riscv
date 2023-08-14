@@ -1,0 +1,87 @@
+From fd8f800f5c56d78930943ee9dc1c23b2f04b4ad1 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Mon, 28 Nov 2022 10:28:52 +0100
+Subject: [PATCH] power: supply: bq25890: Fix setting of F_CONV_RATE rate when
+ disabling HiZ mode
+
+The recent "power: supply: bq25890: Add HiZ mode support" change
+leaves F_CONV_RATE rate unset when disabling HiZ mode (setting
+POWER_SUPPLY_PROP_ONLINE to 1) while a charger is connected.
+
+Separate the resetting HiZ mode (when necessary because of a charger
+(re)plug event) into its own "if {}" block which runs first.
+
+And fix the setting of F_CONV_RATE rate by adding helper variables for
+the old and new F_CONV_RATE state which check both the online and hiz bits
+and then compare the helper variables to see if a F_CONV_RATE update is
+necessary.
+
+Reviewed-by: Marek Vasut <marex@denx.de>
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>
+---
+ drivers/power/supply/bq25890_charger.c | 41 +++++++++++---------------
+ 1 file changed, 17 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/power/supply/bq25890_charger.c b/drivers/power/supply/bq25890_charger.c
+index bfa0239b9e2e..a7115f04871d 100644
+--- a/drivers/power/supply/bq25890_charger.c
++++ b/drivers/power/supply/bq25890_charger.c
+@@ -795,6 +795,7 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
+ 
+ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
+ {
++	bool adc_conv_rate, new_adc_conv_rate;
+ 	struct bq25890_state new_state;
+ 	int ret;
+ 
+@@ -805,33 +806,25 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
+ 	if (!memcmp(&bq->state, &new_state, sizeof(new_state)))
+ 		return IRQ_NONE;
+ 
+-	/* power removed or HiZ */
+-	if ((!new_state.online || new_state.hiz) && bq->state.online) {
+-		/* disable ADC */
+-		ret = bq25890_field_write(bq, F_CONV_RATE, 0);
++	/*
++	 * Restore HiZ bit in case it was set by user. The chip does not retain
++	 * this bit on cable replug, hence the bit must be reset manually here.
++	 */
++	if (new_state.online && !bq->state.online && bq->force_hiz) {
++		ret = bq25890_field_write(bq, F_EN_HIZ, bq->force_hiz);
+ 		if (ret < 0)
+ 			goto error;
+-	} else if (new_state.online && !bq->state.online) {
+-		/*
+-		 * Restore HiZ bit in case it was set by user.
+-		 * The chip does not retain this bit once the
+-		 * cable is re-plugged, hence the bit must be
+-		 * reset manually here.
+-		 */
+-		if (bq->force_hiz) {
+-			ret = bq25890_field_write(bq, F_EN_HIZ, bq->force_hiz);
+-			if (ret < 0)
+-				goto error;
+-			new_state.hiz = 1;
+-		}
++		new_state.hiz = 1;
++	}
+ 
+-		if (!new_state.hiz) {
+-			/* power inserted and not HiZ */
+-			/* enable ADC, to have control of charge current/voltage */
+-			ret = bq25890_field_write(bq, F_CONV_RATE, 1);
+-			if (ret < 0)
+-				goto error;
+-		}
++	/* Should period ADC sampling be enabled? */
++	adc_conv_rate = bq->state.online && !bq->state.hiz;
++	new_adc_conv_rate = new_state.online && !new_state.hiz;
++
++	if (new_adc_conv_rate != adc_conv_rate) {
++		ret = bq25890_field_write(bq, F_CONV_RATE, new_adc_conv_rate);
++		if (ret < 0)
++			goto error;
+ 	}
+ 
+ 	bq->state = new_state;

@@ -1,0 +1,31 @@
+From e902be1d8933c66a2eb43d9f9096b61f258c9bf9 Mon Sep 17 00:00:00 2001
+From: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Date: Fri, 29 Oct 2021 09:11:09 +0800
+Subject: [PATCH] ASoC: es8316: add support for ESSX8336 ACPI _HID
+
+The same codec seems to have different personalities. ESSX8316 was
+used for Baytrail/CherryTrail, ESSX8336 seems to be used for AppoloLake,
+GeminiLake, JasperLake and TigerLake devices.
+
+BugLink: https://github.com/thesofproject/linux/issues/2955
+Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>-e
+Reviewed-by: Kai Vehmanen <kai.vehmanen@linux.intel.com>
+Signed-off-by: Bard Liao <yung-chuan.liao@linux.intel.com>
+Link: https://lore.kernel.org/r/20211029011109.23633-1-yung-chuan.liao@linux.intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ sound/soc/codecs/es8316.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/sound/soc/codecs/es8316.c b/sound/soc/codecs/es8316.c
+index afd6d401e3d0..5a06a2935e76 100644
+--- a/sound/soc/codecs/es8316.c
++++ b/sound/soc/codecs/es8316.c
+@@ -842,6 +842,7 @@ MODULE_DEVICE_TABLE(of, es8316_of_match);
+ #ifdef CONFIG_ACPI
+ static const struct acpi_device_id es8316_acpi_match[] = {
+ 	{"ESSX8316", 0},
++	{"ESSX8336", 0},
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(acpi, es8316_acpi_match);

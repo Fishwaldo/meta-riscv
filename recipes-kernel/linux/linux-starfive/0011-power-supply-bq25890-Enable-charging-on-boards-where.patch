@@ -1,0 +1,43 @@
+From 34af05a7ebaecfaff49957935b8592fae419f227 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Tue, 1 Feb 2022 14:06:53 +0100
+Subject: [PATCH] power: supply: bq25890: Enable charging on boards where we
+ skip reset
+
+On boards where the "linux,skip-reset" boolean property is set we don't
+reset the charger; and on some boards where the fw takes care of
+initalizition F_CHG_CFG is set to 0 before handing control over to the OS.
+
+Explicitly set F_CHG_CFG to 1 on boards where we don't reset the charger,
+so that charging is always enabled on these boards, like it is always
+enabled on boards where we do reset the charger.
+
+Reviewed-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Sebastian Reichel <sebastian.reichel@collabora.com>
+---
+ drivers/power/supply/bq25890_charger.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/power/supply/bq25890_charger.c b/drivers/power/supply/bq25890_charger.c
+index f758e28046e5..d185299db9c3 100644
+--- a/drivers/power/supply/bq25890_charger.c
++++ b/drivers/power/supply/bq25890_charger.c
+@@ -747,6 +747,17 @@ static int bq25890_hw_init(struct bq25890_device *bq)
+ 			dev_dbg(bq->dev, "Reset failed %d\n", ret);
+ 			return ret;
+ 		}
++	} else {
++		/*
++		 * Ensure charging is enabled, on some boards where the fw
++		 * takes care of initalizition F_CHG_CFG is set to 0 before
++		 * handing control over to the OS.
++		 */
++		ret = bq25890_field_write(bq, F_CHG_CFG, 1);
++		if (ret < 0) {
++			dev_dbg(bq->dev, "Enabling charging failed %d\n", ret);
++			return ret;
++		}
+ 	}
+ 
+ 	/* disable watchdog */
