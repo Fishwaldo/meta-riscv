@@ -64,7 +64,7 @@ do_deploy:append:star64() {
 }
 
 do_deploy:append:pinetabv() {
-    install -m 644 ${WORKDIR}/uEnv-pinetabv.txt ${DEPLOYDIR}/vf2_uEnv.txt
+    install -m 644 ${WORKDIR}/uEnv-pinetabv.txt ${DEPLOYDIR}/uEnv.txt
     spl_tool -c -f ${DEPLOYDIR}/${SPL_IMAGE}
     ln -sf ${SPL_IMAGE}.normal.out ${DEPLOYDIR}/${SPL_BINARYNAME}.normal.out
     ln -sf ${SPL_IMAGE}.normal.out ${DEPLOYDIR}/${SPL_SYMLINK}.normal.out
