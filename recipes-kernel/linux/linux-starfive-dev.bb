@@ -10,8 +10,8 @@ SRCREV = "${AUTOREV}"
 # pin srcrev for now to have a fixed target
 # release VF2_v2.11.5
 SRCREV:visionfive2 = "d9eee31aaec51ade1641391836c1f07dd2151a4a"
-SRCREV:star64 = "1e5402d54f4213a1758d88d202ab905b182dc99b"
-SRCREV:pinetabv = "1e5402d54f4213a1758d88d202ab905b182dc99b"
+SRCREV:star64 = "ef11747a8c54394323585776bfc6c77c24d9b178"
+SRCREV:pinetabv = "ef11747a8c54394323585776bfc6c77c24d9b178"
 
 BRANCH = "visionfive"
 BRANCH:visionfive2 = "JH7110_VisionFive2_devel"
