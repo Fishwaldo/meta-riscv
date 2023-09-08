@@ -70,6 +70,15 @@ do_deploy:append:pinetabv() {
     ln -sf ${SPL_IMAGE}.normal.out ${DEPLOYDIR}/${SPL_SYMLINK}.normal.out
 }
 
+do_install:append:pinetabv() {
+    install -d ${D}/boot
+    install -m 644 ${WORKDIR}/uEnv-pinetabv.txt ${D}/boot/uEnv.txt
+}
+
+FILES:${PN}:append:pinetabv = " /boot/uEnv.txt"
+FILES:${PN}:append:star64 = " /boot/vf2_uEnv.txt"
+CONFFILES:${PN}:append:pinetabv = " /boot/uEnv.txt"
+CONFFILES:${PN}:append:star64 = " /boot/vf2_uEnv.txt"
 
 COMPATIBLE_MACHINE = "jh7110"
 
