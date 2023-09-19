@@ -10,8 +10,8 @@ SRCREV = "${AUTOREV}"
 # pin srcrev for now to have a fixed target
 # release VF2_v2.11.5
 SRCREV:visionfive2 = "d9eee31aaec51ade1641391836c1f07dd2151a4a"
-SRCREV:star64 = "c7d5e25012314b25a8ca1237f14385122c530d6e"
-SRCREV:pinetabv = "c7d5e25012314b25a8ca1237f14385122c530d6e"
+SRCREV:star64 = "a220e54eb60bf898adc99d12cb65305ee044809a"
+SRCREV:pinetabv = "a220e54eb60bf898adc99d12cb65305ee044809a"
 
 BRANCH = "visionfive"
 BRANCH:visionfive2 = "JH7110_VisionFive2_devel"
@@ -42,8 +42,8 @@ SRC_URI:append:jh7110 = " \
 
 LINUX_VERSION ?= "6.2.0"
 LINUX_VERSION:visionfive2 = "5.15.0"
-LINUX_VERSION:star64 = "5.15.130"
-LINUX_VERSION:pinetabv = "5.15.130"
+LINUX_VERSION:star64 = "5.15.131"
+LINUX_VERSION:pinetabv = "5.15.131"
 LINUX_VERSION_EXTENSION:append:beaglev-starlight-jh7100 = "-starlight"
 
 KBUILD_DEFCONFIG:beaglev-starlight-jh7100 = "starfive_jh7100_fedora_defconfig"
